@@ -19,7 +19,7 @@
 
 Beyond the **`.md`** file extension, **MD** defines the five operational pillars of the engine:
 
-1. **Markdown** *(The Format)* — 100% local, plain-text data ownership. No proprietary databases, zero daemons, air-gapped privacy.
+1. **Markdown** *(The Format)* — 100% local, plain-text data ownership. No proprietary databases, zero daemons, offline privacy.
 2. **Managing Director** *(The Orchestrator)* — Executive governance for autonomous agent teams. Coordinates Claude, Codex, Hermes, and Ken with unbypassable sign-off gates (`pending-close`) and instant session resumption (`tk u`).
 3. **Model-Driven** *(The Contract)* — Tasks as executable specifications with typed frontmatter, automated verification gates (`eval`), and explicit Definitions of Done.
 4. **Mission Delivery** *(The Focus)* — Relentless delivery orientation. CPM forward/backward passes and zero-slack calculations mathematically guarantee target completion dates.
@@ -29,7 +29,7 @@ It supports two first-class local setups:
 1. **Obsidian + CLI Mode (Recommended)** — Syncs 1:1 with an Obsidian `.base` Kanban board (`bases/tasks.base`), updates `.obsidian/types.json`, and logs completed tasks under `## Task List` in your Daily Note.
 2. **Standalone CLI Mode** — Pure plain-text Markdown cards in a local directory (`~/.local/share/taskmd/tasks` or `~/tasks`), opening directly in `$EDITOR` (`hx`, `nvim`, `micro`, `vim`) with zero Obsidian dependency.
 
-### 100% Local & Air-Gapped Privacy
+### 100% Local & Offline Privacy
 - **Zero Network**: `tk` makes zero network/HTTP requests and has zero telemetry beacons. No accounts, no cloud sync, no tracking.
 - **Plain-Text Data Ownership**: Every task is an open `.md` file; every event is an open `.jsonl` record on your local disk.
 - **Self-Contained Telemetry**: `tk st` computes Little's Law, MTTC, and TPM90 directly in Rust. DuckDB is **not required** to run `tk`, but because the event log is standard `.jsonl`, users can optionally run instant SQL queries with DuckDB (`duckdb -c "SELECT * FROM 'tasks/.events.jsonl'"`).
@@ -47,7 +47,11 @@ curl -fsSL https://raw.githubusercontent.com/ktreharrison/taskmd/main/install.sh
 ### Option B: Build from Source with Cargo (Rust)
 
 ```bash
-cargo install --path /Users/ken/workplace/taskmd
+# Install directly from git:
+cargo install --git https://github.com/ktreharrison/taskmd.git
+
+# Or build locally from cloned repository:
+cargo install --path .
 ```
 
 Verify the binary is on your `$PATH`:
@@ -71,12 +75,12 @@ Or initialize non-interactively with flags:
 ### Option A: Obsidian 1.14 + CLI (Recommended)
 
 ```bash
-tk init --obsidian --path ~/Documents --base bases/tasks.base --daily journals/daily
+tk init --obsidian --path ~/Vault --base bases/tasks.base --daily journals/daily
 ```
 
 What this configures automatically:
-- Creates `~/Documents/tasks/` for atomic Markdown task cards (`tk-001-*.md`).
-- Creates `~/Documents/bases/tasks.base` with 5 pre-configured Obsidian 1.14 Base views:
+- Creates `<vault>/tasks/` (e.g. `~/Vault/tasks/`) for atomic Markdown task cards (`tk-001-*.md`).
+- Creates `<vault>/bases/tasks.base` with 5 pre-configured Obsidian 1.14 Base views:
   1. **Kanban Board** (grouped by `status`: `ready`, `in-progress`, `pending-close`, `blocked`, `done`)
   2. **Pending Close (Sign-Off Queue)** (`status == "pending-close"`)
   3. **Your Personal Queue** (`owner == "<you>"`)
@@ -139,6 +143,7 @@ In merged view (`tk -A`), task IDs display distinct scope indicators (`tk-001L` 
 | `tk find [query]` / `tk find -i` | `tk f` | Fuzzy search tasks (inline table or interactive `fzf` picker + `bat` preview) |
 | `tk history [id]` | `tk h` | Event audit log from `tasks/.events.jsonl` with step duration deltas |
 | `tk stats` | `tk st` | Flow telemetry: Little's Law, MTTC, P50/P90/TPM90, agent split, yield |
+| `tk tree` | `tk tree` | Render dependency DAG tree for active tasks (also `tk dep tree`) |
 | `tk dep [id] --needs [ids]` | `tk dep` | Dependencies: CPM table (`--cpm`), text summaries (`--short`, `--long`, `--summary`), colored JSON (`--json`), tree, DSM (`--dsm`), Gantt (`--gantt`), AON (`--aon`) |
 | `tk archive [id]` | `tk archive` | Move completed tasks to `tasks/archive/` (preserves `.events.jsonl` DB) |
 | `tk prune [id] [-f]` | `tk prune` | Remove completed/archived cards from disk (preserves `.events.jsonl` DB) |

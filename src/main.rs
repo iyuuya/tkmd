@@ -248,6 +248,15 @@ enum Commands {
         #[arg(short, long)]
         open: bool,
     },
+    /// Render dependency tree DAG for active tasks (alias: `tree`, also `tk dep tree`)
+    #[command(visible_alias = "tree")]
+    Tree {
+        /// Optional task ID to inspect (e.g. 2 or tk-002)
+        id: Option<String>,
+        /// Filter by project
+        #[arg(short, long)]
+        project: Option<String>,
+    },
     /// Manage task dependencies (alias: `dep`), e.g. `tk dep 2 --needs 1` or `tk dep tree`
     #[command(visible_alias = "dep")]
     Dep {
@@ -286,7 +295,7 @@ enum Commands {
         /// Output data as structured JSON (for AI agents and automation scripts)
         #[arg(long)]
         json: bool,
-        /// Output plain-text STE-100 narrative schedule summary (default: full technical summary)
+        /// Output plain-text narrative schedule summary (default: full technical summary)
         #[arg(long)]
         summary: bool,
         /// Output short 1-paragraph summary
@@ -1292,6 +1301,9 @@ fn main() -> Result<()> {
                 print_dashboard_table,
             )?;
         }
+        Commands::Tree { id, project } => {
+            render_dependency_tree(&store, id.as_deref(), project.as_deref())?;
+        }
         Commands::Dep {
             id,
             needs,
@@ -1730,37 +1742,7 @@ fn main() -> Result<()> {
                 }
                 println!("```");
             } else if is_tree {
-                let all_cards = store.list_all()?;
-                println!("\n{BOLD}🌲 TASK DEPENDENCY DAG{RESET}");
-                println!("{DIM}────────────────────────────────────────────{RESET}");
-                let mut has_deps = false;
-                for c in &all_cards {
-                    if !c.meta.blocked_by.is_empty() {
-                        has_deps = true;
-                        let status_badge = color_status(&c.meta.status);
-                        println!(
-                            "  {BOLD}{}{RESET} ({}) -> blocked by: {RED}{}{RESET}",
-                            c.meta.id,
-                            status_badge.trim(),
-                            c.meta.blocked_by.join(", ")
-                        );
-                        for bid in &c.meta.blocked_by {
-                            if let Ok(b_card) = store.find_task(bid) {
-                                println!(
-                                    "    └── {DIM}{}{RESET} [{}] ({})",
-                                    b_card.meta.id,
-                                    b_card.meta.title,
-                                    color_status(&b_card.meta.status).trim()
-                                );
-                            }
-                        }
-                    }
-                }
-                if !has_deps {
-                    println!("  {DIM}No dependency constraints recorded yet.{RESET}");
-                    println!("  {DIM}Add one with: tk dep <id> --needs <blocker_id>{RESET}");
-                }
-                println!("{DIM}────────────────────────────────────────────{RESET}");
+                render_dependency_tree(&store, id.as_deref(), project.as_deref())?;
             } else if let Some(dep_id) = id {
                 if needs.is_empty() {
                     let card = store.find_task(&dep_id)?;
@@ -1930,5 +1912,52 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn render_dependency_tree(store: &TaskStore, target_id: Option<&str>, project: Option<&str>) -> anyhow::Result<()> {
+    let all_cards = store.list_all()?;
+    println!("\n{BOLD}🌲 TASK DEPENDENCY DAG{RESET}");
+    println!("{DIM}────────────────────────────────────────────{RESET}");
+    let mut has_deps = false;
+    for c in &all_cards {
+        if let Some(p) = project {
+            if c.meta.project.as_deref() != Some(p) {
+                continue;
+            }
+        }
+        if let Some(tid) = target_id {
+            let clean_tid = tid.trim_start_matches("tk-").trim_start_matches('0');
+            let clean_cid = c.meta.id.trim_start_matches("tk-").trim_start_matches('0');
+            if clean_tid != clean_cid && tid != c.meta.id {
+                continue;
+            }
+        }
+        if !c.meta.blocked_by.is_empty() {
+            has_deps = true;
+            let status_badge = color_status(&c.meta.status);
+            println!(
+                "  {BOLD}{}{RESET} ({}) -> blocked by: {RED}{}{RESET}",
+                c.meta.id,
+                status_badge.trim(),
+                c.meta.blocked_by.join(", ")
+            );
+            for bid in &c.meta.blocked_by {
+                if let Ok(b_card) = store.find_task(bid) {
+                    println!(
+                        "    └── {DIM}{}{RESET} [{}] ({})",
+                        b_card.meta.id,
+                        b_card.meta.title,
+                        color_status(&b_card.meta.status).trim()
+                    );
+                }
+            }
+        }
+    }
+    if !has_deps {
+        println!("  {DIM}No dependency constraints recorded yet.{RESET}");
+        println!("  {DIM}Add one with: tk dep <id> --needs <blocker_id>{RESET}");
+    }
+    println!("{DIM}────────────────────────────────────────────{RESET}\n");
     Ok(())
 }

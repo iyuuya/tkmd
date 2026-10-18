@@ -2,7 +2,7 @@
 id: tk-001
 title: Publish taskmd repository to GitHub
 type: task
-status: pending-close
+status: done
 priority: P0
 owner: ken
 topic:
@@ -24,3 +24,4 @@ _organized: true
 ## Execution Log
 - Created and assigned to `ken`.
 - `2026-10-18 18:12`: Submitted for `pending-close` review by `agent` 🔍 — Ready for review.
+- `2026-10-18 19:38`: Completed (`done`) by `ken` ✅ — Published to https://github.com/ktreharrison/taskmd.
