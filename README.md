@@ -24,20 +24,11 @@ When you pair with AI coding agents (Claude Code, Codex, Gemini, OpenCode), `tkm
 ### Why Use tkmd?
 
 - **100% Local & Offline**: No cloud accounts, no subscriptions, and zero background daemons. Single Rust binary with POSIX advisory file locking.
-- **AI Agent Guardrails**: Agents cannot close tasks. Agents submit work to `pending-close` with automated test proofs. Humans sign off.
+- **AI Agent Guardrails**: Subagents cannot skip straight to `done`. They must pass automated shell tests and submit work to `pending-close`. Humans sign off directly or instruct an agent as proxy.
 - **Mathematical Scheduling**: Calculates early start, early finish, schedule buffers, and the Critical Path (`tk dep --cpm`) deterministically.
 - **Blocker & Loop Detection**: View dependency trees (`tk tree`) and circular deadlocks (`tk dep --dsm`) in terminal colors.
 - **One-Command Session Resume**: Reopen the exact AI terminal session attached to any task (`tk u <id>`).
 - **Flexible Storage**: Manage repository-level tasks (`tk init -L`) or central Obsidian Kanban boards (`bases/tasks.base`).
-
-### The 5 Core Pillars (TKMD)
-
-1. **Task Markdown**: Plain-text cards you own. Edit with any text editor (`hx`, `nvim`, `micro`, `vim`).
-2. **Managing Director**: Executive human sign-off gates (`pending-close`) and one-keystroke agent session resumption (`tk u`).
-3. **Model-Driven**: Native Model Context Protocol server (`tkmd mcp` or `tk mcp`) for Claude, Codex, Gemini, and Cursor.
-4. **Mission Delivery**: Automated verification test commands (`eval`) that must pass before review.
-5. **Matrix & Dependencies**: Exact Critical Path Method (CPM) schedules and Dependency Structure Matrices (DSM).
-
 It supports two first-class local setups:
 1. **Obsidian + CLI Mode (Recommended)** — Syncs 1:1 with an Obsidian `.base` Kanban board (`bases/tasks.base`), updates `.obsidian/types.json`, and logs completed tasks under `## Task List` in your Daily Note.
 2. **Standalone CLI Mode** — Pure plain-text Markdown cards in a local directory (`~/.local/share/tkmd/tasks` or `~/tasks`), opening directly in `$EDITOR` (`hx`, `nvim`, `micro`, `vim`) with zero Obsidian dependency.
@@ -86,7 +77,7 @@ flowchart TD
 3. **Collision-Free Concurrent Execution**:
    Multiple subagents running concurrently across separate terminal panes or CLI processes claim independent tasks (`tk c <id>`). POSIX advisory file locking prevents write collisions without a database server.
 4. **Automated Verification Gates (`eval`)**:
-   Subagents cannot close tasks. A subagent must run automated verification (`tk eval <id>`) and submit work to `pending-close` (`tk r <id>`).
+   Subagents running autonomously cannot skip `pending-close`. A subagent must run automated verification (`tk eval <id>`) and submit work for review (`tk r <id>`). Only human sign-off (entered directly or instructed as a proxy) marks a task `done`.
 5. **Cascade Unblocking & Session Resumption**:
    When human sign-off marks a blocker `done` (`tk d <id>`), `tkmd` automatically promotes downstream blocked tasks to `ready`. If any subagent stalls, `tk u <id>` immediately resumes its conversation session.
 

@@ -1982,9 +1982,8 @@ pub fn run() -> Result<()> {
             println!("{}{BOLD}     ██║   ██║ ╚██╗{}{BOLD}██║ ╚═╝ ██║██████╔╝{RESET}", cyan, coral);
             println!("{}{BOLD}     ╚═╝   ╚═╝  ╚═╝{}{BOLD}╚═╝     ╚═╝╚═════╝ {RESET}\n", cyan, coral);
             println!("  {BOLD}tkmd{RESET} {DIM}v{}{RESET} • {BOLD}{BLUE}Deterministic Program Management Engine & Multi-Agent MCP Server{RESET}", env!("CARGO_PKG_VERSION"));
-            println!("  {DIM}Dual Licensed:{RESET} {GREEN}MIT OR Apache-2.0{RESET} • Copyright (c) 2026 Ken Harrison");
-            println!("  {DIM}TKMD Pillars:{RESET} {AQUA}Task Markdown{RESET} • {PURPLE}Managing Director{RESET} • {BLUE}Model-Driven{RESET} • {GREEN}Mission Delivery{RESET} • {ORANGE}Matrix & Dependencies{RESET}");
-            println!("  {DIM}Zero daemons • 100% local • Mathematical CPM & DSM • Universal Stdio MCP{RESET}\n");
+            println!("  {DIM}Zero daemons • 100% local • Mathematical CPM & DSM • Universal Stdio MCP{RESET}");
+            println!("  {DIM}Dual Licensed:{RESET} {GREEN}MIT OR Apache-2.0{RESET} • Copyright (c) 2026 Ken Harrison\n");
         }
         Commands::Completions { .. } => unreachable!(),
     }

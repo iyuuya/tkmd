@@ -115,12 +115,19 @@ sequenceDiagram
 
 ### Review Gate: `pending-close`
 
-AI agents must not close tasks directly. `tkmd` enforces a review transition:
+AI agents cannot close tasks directly during autonomous execution. `tkmd` enforces a review transition:
 
 - When an agent finishes work, it runs `tk eval <id>` to execute the card's shell test.
 - If the test returns exit code 0, the agent runs `tk r <id>` (`tk review`). This moves the task to `pending-close`.
-- **Review Guardrail**: If an agent runs `tk d` or calls the MCP `task_complete` tool, `tkmd` stops the action and moves the task to `pending-close`. Even if the agent omits the `--actor` flag, an agent-owned task cannot move to `done` without prior review.
-- Only a human user can mark the task `done` (`tk d <id>`). This action checks off Definition of Done (`--dod`) items and unblocks downstream tasks.
+- **Review Guardrail**: If an agent runs `tk d` or calls the MCP `task_complete` tool on an unreviewed task, `tkmd` blocks the action and moves the task to `pending-close`. Even if the agent omits the `--actor` flag, an agent-owned task cannot move directly to `done`.
+
+#### Human Sign-Off vs. Agent Proxy
+
+`tkmd` enforces a workflow harness, not cryptographic user authentication:
+- **Autonomous Agent Workflows**: An agent working in a loop cannot bypass `pending-close`. It must wait for human sign-off.
+- **Instructed Closure (Agent as Proxy)**: If a human user explicitly tells an agent in chat to close a task that is already in `pending-close`, the agent can execute `tk d <id>` using its shell access. In this case, the agent acts as a proxy for the human.
+- **Physical Human Sign-Off**: For strict verification, the engineer reviews the pending banner and enters `tk d <id>` directly in the terminal.
+
 
 ### Session Resumption (`tk u <id>`)
 
