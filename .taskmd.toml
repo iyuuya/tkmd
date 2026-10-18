@@ -1,0 +1,7 @@
+mode = "cli"
+vault_path = "."
+tasks_dir = "tasks"
+base_file = ""
+daily_dir = ""
+default_owner = "ken"
+editor = "hx"
