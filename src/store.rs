@@ -102,7 +102,8 @@ pub fn detect_obsidian_vault() -> Option<PathBuf> {
     None
 }
 
-/// Auto-detect a local project store by checking for `.taskmd.toml`, `taskmd.toml`, `.taskmd/config.toml`,
+/// Auto-detect a local project store by checking for `.tkmd.toml`, `tkmd.toml`, `.tkmd/config.toml`,
+/// or legacy `.taskmd.toml`, `taskmd.toml`, `.taskmd/config.toml`,
 /// or a `.git` root containing a `tasks/` directory.
 /// Skips if the detected directory is the global Obsidian vault path.
 pub fn detect_local_store(cwd: &Path, global_vault_path: &Path) -> Option<PathBuf> {
@@ -219,7 +220,7 @@ pub fn detect_editor() -> String {
         .unwrap_or_else(|| "vim".to_string())
 }
 
-/// Configuration loaded from `~/.config/taskmd/config.toml`.
+/// Configuration loaded from `~/.config/tkmd/config.toml` (or legacy `~/.config/taskmd/config.toml`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// "obsidian" (Recommended: Kanban Base + Daily Note + CLI + MCP) or "cli" (Standalone CLI + MCP)
@@ -1914,7 +1915,7 @@ mod tests {
 
     #[test]
     fn test_update_task_properties() {
-        let tmp = std::env::temp_dir().join(format!("taskmd-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tkmd-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
@@ -1974,7 +1975,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_atomic_writes() {
-        let tmp = std::env::temp_dir().join(format!("taskmd-concurrent-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tkmd-concurrent-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
@@ -2036,8 +2037,8 @@ mod tests {
 
     #[test]
     fn test_local_vs_global_aggregation() {
-        let tmp_global = std::env::temp_dir().join(format!("taskmd-global-{}", std::process::id()));
-        let tmp_local = std::env::temp_dir().join(format!("taskmd-local-{}", std::process::id()));
+        let tmp_global = std::env::temp_dir().join(format!("tkmd-global-{}", std::process::id()));
+        let tmp_local = std::env::temp_dir().join(format!("tkmd-local-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp_global);
         let _ = fs::remove_dir_all(&tmp_local);
         fs::create_dir_all(tmp_global.join("tasks")).unwrap();
@@ -2107,7 +2108,7 @@ mod tests {
 
     #[test]
     fn test_eval_gate_blocks_failing_command() {
-        let tmp = std::env::temp_dir().join(format!("taskmd-test-eval-fail-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tkmd-test-eval-fail-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("tasks")).unwrap();
 
@@ -2152,7 +2153,7 @@ mod tests {
 
     #[test]
     fn test_eval_gate_passes_valid_command() {
-        let tmp = std::env::temp_dir().join(format!("taskmd-test-eval-pass-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tkmd-test-eval-pass-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("tasks")).unwrap();
 
@@ -2194,7 +2195,7 @@ mod tests {
 
     #[test]
     fn test_agent_guardrail_cannot_mark_done() {
-        let tmp = std::env::temp_dir().join(format!("taskmd-test-guardrail-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tkmd-test-guardrail-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("tasks")).unwrap();
 
@@ -2232,7 +2233,7 @@ mod tests {
 
     #[test]
     fn test_human_sign_off_marks_done_and_checks_dod() {
-        let tmp = std::env::temp_dir().join(format!("taskmd-test-signoff-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tkmd-test-signoff-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("tasks")).unwrap();
 

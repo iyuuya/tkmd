@@ -1,8 +1,8 @@
-# Contributing to `taskmd` (`tk`)
+# Contributing to `tkmd` (`tk`)
 
-Thank you for your interest in contributing to `taskmd`!
+Thank you for your interest in contributing to `tkmd`!
 
-`taskmd` is designed to be a high-performance, single-binary, local-first bridge between human task management (Obsidian / CLI) and autonomous AI coding agents (`agy`, `claude`, `codex`, `hermes`, etc.).
+`tkmd` is designed to be a high-performance, single-binary, local-first bridge between human task management (Obsidian / CLI) and autonomous AI coding agents (`agy`, `claude`, `codex`, `hermes`, etc.).
 
 ---
 
@@ -11,7 +11,7 @@ Thank you for your interest in contributing to `taskmd`!
 All contributions must preserve these architectural invariants:
 
 1. **100% Local-First & Air-Gapped**: Zero network requests, zero telemetry beacons, zero cloud accounts.
-2. **Zero Runtime Dependencies**: The compiled binary (`tk`) must remain a self-contained static executable with no external interpreter dependencies (no Node, Python, SQLite, or C shared libraries).
+2. **Zero Runtime Dependencies**: The compiled binary (`tkmd` / `tk`) must remain a self-contained static executable with no external interpreter dependencies (no Node, Python, SQLite, or C shared libraries).
 3. **Plain-Text Data Ownership**: All state lives in standard Markdown (`.md`) files and newline-delimited JSON (`.events.jsonl`).
 4. **Harness Engineering**: Autonomous AI agents must never mark tasks as `done` directly. Agent completion requests must always route through the `pending-close` review gate.
 
@@ -40,8 +40,8 @@ src/
 
 ```bash
 # Clone the repository
-git clone https://github.com/ktreharrison/taskmd.git
-cd taskmd
+git clone https://github.com/ktreharrison/tkmd.git
+cd tkmd
 
 # Run test suite
 cargo test

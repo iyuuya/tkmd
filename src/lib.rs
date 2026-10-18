@@ -817,7 +817,7 @@ fn print_review_card_summary(c: &TaskCard) {
     }
 }
 
-fn main() -> Result<()> {
+pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(Commands::Completions { shell, ref bin }) = cli.command {

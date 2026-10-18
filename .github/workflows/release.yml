@@ -54,11 +54,13 @@ jobs:
         shell: bash
         run: |
           BIN_PATH="target/${{ matrix.target }}/release/tkmd"
+          TK_PATH="target/${{ matrix.target }}/release/tk"
           if command -v strip >/dev/null 2>&1; then
             strip "${BIN_PATH}" || true
+            strip "${TK_PATH}" || true
           fi
           ARCHIVE_NAME="tkmd-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          tar -czf "${ARCHIVE_NAME}" -C "target/${{ matrix.target }}/release" tkmd
+          tar -czf "${ARCHIVE_NAME}" -C "target/${{ matrix.target }}/release" tkmd tk
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
           else
@@ -70,7 +72,7 @@ jobs:
         shell: pwsh
         run: |
           $ARCHIVE_NAME = "tkmd-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          Compress-Archive -Path "./target/${{ matrix.target }}/release/tkmd.exe" -DestinationPath $ARCHIVE_NAME -Force
+          Compress-Archive -Path "./target/${{ matrix.target }}/release/tkmd.exe", "./target/${{ matrix.target }}/release/tk.exe" -DestinationPath $ARCHIVE_NAME -Force
           $HASH = (Get-FileHash -Path $ARCHIVE_NAME -Algorithm SHA256).Hash.ToLower()
           "$HASH  $ARCHIVE_NAME" | Out-File -FilePath "$ARCHIVE_NAME.sha256" -Encoding ascii
 

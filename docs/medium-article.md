@@ -169,7 +169,7 @@ Internally, all duration arithmetic is standardized on 64-bit integer seconds (`
 By running `tk dep --cpm` or `tk dep summary`, `tkmd` calculates:
 - **Early Start (ES)** & **Early Finish (EF)**: The earliest possible completion times via forward-pass topology.
 - **Late Start (LS)** & **Late Finish (LF)**: The latest possible start without delaying project delivery via backward-pass topology.
-- **Buffer / Float**: Exact slack time available for non-critical tasks.
+- **Buffer / Float**: Exact schedule buffer available for non-critical tasks.
 - **Critical Path**: The zero-buffer sequence of tasks where any delay directly delays project delivery.
 
 ```

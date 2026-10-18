@@ -13,7 +13,7 @@
 
 **`tkmd` (CLI: `tk` / `tkmd`) is a deterministic program engine and multi-agent governance harness.**
 
-It stores every task as a plain Markdown card (`.md`) with YAML frontmatter in `tasks/tk-XXX-*.md`. It uses mathematical graph algorithms (Critical Path Method and Design Structure Matrices) to schedule work, calculate slack buffers, and surface circular deadlocks.
+It stores every task as a plain Markdown card (`.md`) with YAML frontmatter in `tasks/tk-XXX-*.md`. It uses mathematical graph algorithms (Critical Path Method and Design Structure Matrices) to schedule work, calculate schedule buffers, and surface circular deadlocks.
 
 When you pair with AI coding agents (Claude Code, Codex, Gemini, OpenCode), `tkmd` prevents agents from falsely claiming work is finished. Agents must pass automated shell verification gates (`eval`) and submit work for human sign-off (`pending-close`) before a task can transition to `done`.
 
@@ -25,7 +25,7 @@ When you pair with AI coding agents (Claude Code, Codex, Gemini, OpenCode), `tkm
 
 - **100% Local & Offline**: No cloud accounts, no subscriptions, and zero background daemons. Single Rust binary with POSIX advisory file locking.
 - **AI Agent Guardrails**: Agents cannot close tasks. Agents submit work to `pending-close` with automated test proofs. Humans sign off.
-- **Mathematical Scheduling**: Calculates early start, early finish, slack, and the Critical Path (`tk dep --cpm`) deterministically.
+- **Mathematical Scheduling**: Calculates early start, early finish, schedule buffers, and the Critical Path (`tk dep --cpm`) deterministically.
 - **Blocker & Loop Detection**: View dependency trees (`tk tree`) and circular deadlocks (`tk dep --dsm`) in terminal colors.
 - **One-Command Session Resume**: Reopen the exact AI terminal session attached to any task (`tk u <id>`).
 - **Flexible Storage**: Manage repository-level tasks (`tk init -L`) or central Obsidian Kanban boards (`bases/tasks.base`).
@@ -58,7 +58,7 @@ flowchart TD
     subgraph Phase1["1. Autonomous Planning & Decomp"]
         Lead["Lead Architect / Human"] -->|"Decomposes spec"| T1["Task 1: Core API\n(Status: ready)"]
         Lead -->|"Declares dependency"| T2["Task 2: Frontend\n(Status: blocked by Task 1)"]
-        T1 -.->|"Mathematical CPM\n(tk dep --cpm)"| Critical["Critical Path: Task 1 → Task 2\nZero Slack"]
+        T1 -.->|"Mathematical CPM\n(tk dep --cpm)"| Critical["Critical Path: Task 1 → Task 2\nZero Buffer"]
     end
 
     subgraph Phase2["2. Guarded Subagent Execution"]
@@ -82,7 +82,7 @@ flowchart TD
 1. **Topological Planning (No Circular Loops)**:
    A lead architect agent decomposes an epic into tasks. Running `tk dep --dsm` runs cycle detection across the dependency matrix, catching circular deadlocks before coding starts.
 2. **Mathematical CPM Allocation**:
-   `tk dep --cpm` computes early start (ES), late finish (LF), and slack buffers. The orchestrator prioritizes subagents on zero-slack Critical Path tasks.
+   `tk dep --cpm` computes early start (ES), late finish (LF), and schedule buffers. The orchestrator prioritizes subagents on zero-buffer Critical Path tasks.
 3. **Collision-Free Concurrent Execution**:
    Multiple subagents running concurrently across separate terminal panes or CLI processes claim independent tasks (`tk c <id>`). POSIX advisory file locking prevents write collisions without a database server.
 4. **Automated Verification Gates (`eval`)**:
@@ -110,13 +110,22 @@ cargo install tkmd
 cargo install --path .
 ```
 
-Verify the binary is on your `$PATH`:
+`Cargo.toml` declares two binary targets: `tkmd` and `tk`. Running `cargo install tkmd` installs both binaries to `~/.cargo/bin/`:
 
 ```bash
 tkmd --help
-# Or use the short alias:
+# Or use the ergonomic 2-letter alias:
 tk --help
 ```
+
+### Binary Naming & Collision Avoidance (`wedow/ticket` and Grafana Tanka)
+
+The short command `tk` is also claimed by:
+1. **`wedow/ticket`**: A Git-backed markdown issue tracker that installs a binary named `tk`.
+2. **Grafana Tanka (`grafana/tanka`)**: The Kubernetes Jsonnet configuration tool whose official Homebrew package installs `/opt/homebrew/bin/tk`.
+
+To eliminate silent namespace collisions and PATH clobbering, the crate and primary binary is named **`tkmd`**, with **`tk`** provided as a first-class co-installed binary. Every command, flag, and MCP capability functions identically under both `tkmd` and `tk`. If your workstation already has Grafana Tanka or `wedow/ticket` installed, you can invoke `tkmd` directly or set a customized shell alias (`alias tkm="tkmd"`).
+
 
 ### Shell Auto-Completion
 

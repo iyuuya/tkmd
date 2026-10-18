@@ -28,7 +28,7 @@ pub struct CpmTaskSchedule {
     #[serde(rename = "buffer_seconds", alias = "buffer")]
     pub buffer_seconds: u64,
     pub buffer_display: String,
-    pub slack_days: u32,
+    pub buffer_days: u32,
     pub is_critical: bool,
     pub status: String,
     pub owner: String,
@@ -802,7 +802,7 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
         let buffer = ls.saturating_sub(es);
         let is_critical = buffer == 0;
         let d_days = (d / 86400).max(1) as u32;
-        let slack_days = (buffer / 86400) as u32;
+        let buffer_days = (buffer / 86400) as u32;
 
         let (title, status, owner, project, blocked_by) = if let Some(c) = card_map.get(id) {
             (
@@ -829,7 +829,7 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
             late_finish: lf,
             buffer_seconds: buffer,
             buffer_display: format_duration_concise(buffer),
-            slack_days,
+            buffer_days,
             is_critical,
             status,
             owner,
@@ -1555,7 +1555,7 @@ mod tests {
         assert_eq!(analysis.project_duration_days, 5);
         assert_eq!(analysis.critical_path, vec!["tk-001", "tk-002"]);
         for t in &analysis.schedule {
-            assert_eq!(t.slack_days, 0);
+            assert_eq!(t.buffer_days, 0);
             assert!(t.is_critical);
         }
     }
@@ -1582,11 +1582,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_cpm_slack_calculation() {
+    fn test_compute_cpm_buffer_calculation() {
         // Path A: tk-001 (1d) -> tk-003 (2d) = 3d
         // Path B: tk-002 (5d) -> tk-003 (2d) = 7d
         // Critical path must be tk-002 -> tk-003 (7d duration)
-        // tk-001 must have float/slack of 4d
+        // tk-001 must have schedule buffer of 4d
         let cards = vec![
             make_test_card("tk-001", "Short Task", "2026-10-01", Some("2026-10-02"), vec![]), // 1d
             make_test_card("tk-002", "Long Task", "2026-10-01", Some("2026-10-06"), vec![]), // 5d
@@ -1602,18 +1602,18 @@ mod tests {
         assert_eq!(t1.early_finish, 86400);
         assert_eq!(t1.late_start, 345600);
         assert_eq!(t1.late_finish, 432000);
-        assert_eq!(t1.slack_days, 4);
+        assert_eq!(t1.buffer_days, 4);
         assert_eq!(t1.buffer_seconds, 345600);
         assert!(!t1.is_critical);
 
         let t2 = analysis.schedule.iter().find(|t| t.id == "tk-002").unwrap();
         assert_eq!(t2.duration_days, 5);
-        assert_eq!(t2.slack_days, 0);
+        assert_eq!(t2.buffer_days, 0);
         assert!(t2.is_critical);
 
         let t3 = analysis.schedule.iter().find(|t| t.id == "tk-003").unwrap();
         assert_eq!(t3.duration_days, 2);
-        assert_eq!(t3.slack_days, 0);
+        assert_eq!(t3.buffer_days, 0);
         assert!(t3.is_critical);
 
         let json_str = serde_json::to_string(&t1).unwrap();

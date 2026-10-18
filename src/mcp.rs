@@ -158,7 +158,7 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
                         },
                         {
                             "name": "task_cpm",
-                            "description": "Calculate Critical Path Method (CPM) metrics (ES, EF, LS, LF, Slack, project duration, critical path) for active tasks without diagrams.",
+                            "description": "Calculate Critical Path Method (CPM) metrics (ES, EF, LS, LF, Buffer, project duration, critical path) for active tasks without diagrams.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {}
@@ -325,7 +325,7 @@ mod tests {
     use std::fs;
 
     fn setup_test_store(name: &str) -> (TaskStore, std::path::PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("taskmd-mcp-test-{}-{}", name, std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tkmd-mcp-test-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("tasks")).unwrap();
 

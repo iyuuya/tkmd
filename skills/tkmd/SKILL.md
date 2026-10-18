@@ -46,7 +46,7 @@ All active tasks live as atomic Markdown cards in `tasks/tk-XXX-*.md` (and rende
 7. **Manage Dependencies & Critical Path (`tk dep`)**:
    ```bash
    tk dep 3 --needs 1,2   # Blocks tk-003 until tk-001 and tk-002 are done
-   tk dep --cpm           # Plain-text Critical Path table (Dur, ES, EF, LS, LF, Slack, Condition)
+   tk dep --cpm           # Plain-text Critical Path table (Dur, ES, EF, LS, LF, Buffer, Condition)
    tk dep summary         # Plain-text STE-100 full technical schedule summary
    tk dep short           # Concise 1-paragraph summary (or tk dep summary --short)
    tk dep long            # Full multi-section breakdown (or tk dep --cpm --long)
@@ -57,7 +57,7 @@ All active tasks live as atomic Markdown cards in `tasks/tk-XXX-*.md` (and rende
    tk dep --aon           # Outputs Activity-on-Node (AON) CPM network diagram
    tk dep --mermaid       # Outputs standard Mermaid flowchart
    ```
-   - **MCP Tool `task_cpm`**: AI agents can query project duration, critical path sequences, and task slack directly without diagrams or shell execution.
+   - **MCP Tool `task_cpm`**: AI agents can query project duration, critical path sequences, and task schedule buffers directly without diagrams or shell execution.
    - In `todo.txt` syntax, tasks can declare dependencies with `needs:1,2`, `after:1,2`, or `dep:1,2`.
    - Blocked tasks cannot be claimed (`claim` guardrail).
    - Completing a blocker (`tk d`) automatically triggers a cascade check, promoting newly unblocked tasks from `blocked` to `ready` and sending a notification.

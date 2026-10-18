@@ -1,6 +1,6 @@
-# AGENTS.md — Taskmd AI Agent Operating Instructions
+# AGENTS.md — TKMD AI Agent Operating Instructions
 
-This file instructs AI agents (Codex, Claude Code, Gemini CLI, Hermes, Cursor, Windsurf, Aider) on how to operate within a project managed by **`taskmd` (`tk`)**.
+This file instructs AI agents (Codex, Claude Code, Gemini CLI, Hermes, Cursor, Windsurf, Aider) on how to operate within a project managed by **`tkmd` (`tk`)**.
 
 ---
 
@@ -16,13 +16,13 @@ This file instructs AI agents (Codex, Claude Code, Gemini CLI, Hermes, Cursor, W
 
 ## 2. MCP Server Configuration
 
-`taskmd` includes a built-in JSON-RPC Model Context Protocol (MCP) server. Configure it in your agent settings:
+`tkmd` includes a built-in JSON-RPC Model Context Protocol (MCP) server. Configure it in your agent settings:
 
 ### Claude Desktop / Claude Code (`~/.claude/config.json` or `claude.json`)
 ```json
 {
   "mcpServers": {
-    "taskmd": {
+    "tkmd": {
       "command": "tk",
       "args": ["mcp"]
     }
@@ -34,7 +34,7 @@ This file instructs AI agents (Codex, Claude Code, Gemini CLI, Hermes, Cursor, W
 ```json
 {
   "mcpServers": {
-    "taskmd": {
+    "tkmd": {
       "command": "tk",
       "args": ["mcp"]
     }
@@ -98,7 +98,7 @@ tk r 1 -a <agent-name> -s "<session-id>" -n "Implemented auth middleware. Tests 
 *(MCP equivalent: `task_review({ id: "tk-001", actor: "<agent-name>", notes: "..." })`)*
 
 > [!CAUTION]
-> Do not attempt to run `tk d` or `task_complete`. Non-human actors are intercepted by `taskmd`'s guardrail hook and routed to `pending-close`.
+> Do not attempt to run `tk d` or `task_complete`. Non-human actors are intercepted by `tkmd`'s guardrail hook and routed to `pending-close`.
 
 ---
 
@@ -129,4 +129,4 @@ tk dep --aon       # Activity-on-Node diagram with schedule buffers
 
 - **Non-Interactive Shells**: When using `tk` inside automated scripts or subagents, avoid commands that invoke interactive `$EDITOR` or `fzf` without batch flags. Use `tk set` to update properties programmatically.
 - **Stop Hook Check**: Before terminating an agent turn, ensure you have no tasks lingering in `in-progress`. Either evaluate and submit with `tk r`, or release with `tk set <id> --status ready`.
-- **Atomic Concurrency**: `taskmd` uses POSIX `flock` and atomic writes. Multiple agents may safely read and write simultaneously.
+- **Atomic Concurrency**: `tkmd` uses POSIX `flock` and atomic writes. Multiple agents may safely read and write simultaneously.
