@@ -1325,8 +1325,16 @@ views:
     /// Built-in Guardrail Hook: if `actor` is an AI agent (not `default_owner`), automatically
     /// redirects to `pending-close` so agents can never bypass human sign-off!
     pub fn complete_task(&self, query: &str, actor: &str, note: Option<&str>) -> Result<TaskCard> {
+        let card_check = self.find_task(query)?;
         if !actor.eq_ignore_ascii_case(&self.config.default_owner) {
             return self.submit_for_review(query, actor, note, None);
+        }
+
+        // If task is owned by an agent and not yet submitted for review, route to pending-close
+        if !card_check.meta.owner.eq_ignore_ascii_case(&self.config.default_owner)
+            && card_check.meta.status != TaskStatus::PendingClose
+        {
+            return self.submit_for_review(query, &card_check.meta.owner, note, None);
         }
 
         let (mut card, passed, eval_out) = self.run_eval(query, actor)?;
@@ -2227,6 +2235,13 @@ mod tests {
         // Guardrail MUST intercept and force status to pending-close (not done!)
         assert_eq!(res.meta.status, TaskStatus::PendingClose);
         assert_ne!(res.meta.status, TaskStatus::Done);
+
+        // Even if an agent task is called with default_owner ("ken") while in-progress,
+        // it must still divert to pending-close first because it has not yet been reviewed!
+        let card2 = store.add_task("p1 Another agent task @claude", None, vec![], None, None).unwrap();
+        let res2 = store.complete_task(&card2.meta.id, "ken", Some("Agent tries to skip review")).unwrap();
+        assert_eq!(res2.meta.status, TaskStatus::PendingClose);
+        assert_ne!(res2.meta.status, TaskStatus::Done);
 
         let _ = fs::remove_dir_all(&tmp);
     }

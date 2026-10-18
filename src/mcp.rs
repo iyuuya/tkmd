@@ -303,7 +303,7 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
             let actor = args
                 .get("actor")
                 .and_then(|v| v.as_str())
-                .unwrap_or(&store.config.default_owner);
+                .unwrap_or("agent");
             let note = args.get("note").and_then(|v| v.as_str());
             let card = store.complete_task(id, actor, note)?;
             Ok(serde_json::to_string_pretty(&card)?)
