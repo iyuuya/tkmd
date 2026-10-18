@@ -3,27 +3,40 @@
 </p>
 
 <p align="center">
-  <b>Markdown Program Engine for Human + AI Teams</b><br>
-  <i>Single-binary Rust engine • Mathematical CPM &amp; DSM • Universal Stdio MCP • Dual-licensed: MIT OR Apache-2.0</i>
-</p>
-
-<p align="center">
-  <img src="assets/demo.gif" alt="taskmd terminal recording" width="760">
+  <b>Markdown Task &amp; Project Manager for Developers and AI Agents</b><br>
+  <i>Local plain-text cards • Critical path schedules • Built-in MCP for AI tools</i>
 </p>
 
 ---
 
-`taskmd` (`tk`) is a deterministic program management engine, multi-agent governance harness, and dual-framing Model Context Protocol (MCP) server. It is built around plain Markdown cards (`tasks/tk-XXX-*.md`), mathematical Critical Path scheduling (CPM), Design Structure Matrices (DSM), automated shell verification gates (`eval`), and an append-only DuckDB-queryable telemetry stream (`tasks/.events.jsonl`).
+## What is taskmd?
 
-### The 5 Dimensions of `taskmd`
+**`taskmd` (`tk`) is a fast, local task manager for developers and AI coding agents.**
 
-Beyond the **`.md`** file extension, **MD** defines the five operational pillars of the engine:
+It stores every task as a plain Markdown file (`.md`) on your computer. It uses mathematical graph algorithms to schedule work, find blockers, and identify the Critical Path.
 
-1. **Markdown** *(The Format)* — 100% local, plain-text data ownership. No proprietary databases, zero daemons, offline privacy.
-2. **Managing Director** *(The Orchestrator)* — Executive governance for autonomous agent teams. Coordinates Claude, Codex, Hermes, and Ken with unbypassable sign-off gates (`pending-close`) and instant session resumption (`tk u`).
-3. **Model-Driven** *(The Contract)* — Tasks as executable specifications with typed frontmatter, automated verification gates (`eval`), and explicit Definitions of Done.
-4. **Mission Delivery** *(The Focus)* — Relentless delivery orientation. CPM forward/backward passes and zero-slack calculations mathematically guarantee target completion dates.
-5. **Matrix & Dependencies** *(The Engine)* — Design Structure Matrix (DSM) feedback loop detection and Activity-on-Node (AON) graph networks.
+When you pair with AI coding agents (such as Claude Code, Codex, or Gemini), `taskmd` prevents agents from falsely claiming work is finished. Agents must run automated test commands (`eval`) and submit work for human review before a task can close.
+
+<p align="center">
+  <img src="assets/demo.gif" alt="taskmd interactive terminal recording" width="760">
+</p>
+
+### Why Use taskmd?
+
+- **100% Local & Offline**: No cloud accounts, no subscriptions, and zero background daemons. You own your data.
+- **AI Agent Guardrails**: AI agents cannot mark tasks as `done`. Agents must submit work to `pending-close` for human sign-off.
+- **Mathematical Scheduling**: `taskmd` calculates early start times, buffers, and the Critical Path (`tk dep --cpm`) without guessing.
+- **Blocker Detection**: View dependency trees (`tk tree`) and circular deadlocks (`tk dep --dsm`) directly in your terminal.
+- **One-Command Session Resume**: Reopen the exact AI terminal session attached to any task (`tk u <id>`).
+- **Flexible Storage**: Manage repository-level tasks (`tk init -L`) or central Obsidian Kanban boards (`bases/tasks.base`).
+
+### The 5 Core Pillars (MD)
+
+1. **Markdown**: Plain-text files you own. Edit cards with any text editor (`hx`, `nvim`, `micro`, `vim`).
+2. **Managing Director**: Executive sign-off gates (`pending-close`) and one-keystroke agent session resumption (`tk u`).
+3. **Model-Driven**: Native Model Context Protocol server (`tk mcp`) for Claude, Codex, Gemini, and Cursor.
+4. **Mission Delivery**: Automated verification test commands (`eval`) that must pass before review.
+5. **Matrix & Dependencies**: Exact Critical Path Method (CPM) schedules and Dependency Structure Matrices (DSM).
 
 It supports two first-class local setups:
 1. **Obsidian + CLI Mode (Recommended)** — Syncs 1:1 with an Obsidian `.base` Kanban board (`bases/tasks.base`), updates `.obsidian/types.json`, and logs completed tasks under `## Task List` in your Daily Note.

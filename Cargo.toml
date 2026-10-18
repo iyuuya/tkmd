@@ -2,7 +2,7 @@
 name = "taskmd"
 version = "0.1.0"
 edition = "2024"
-description = "Markdown Program Engine for Human + AI Teams (CPM, DSM, Obsidian Bases, Multi-Agent MCP)"
+description = "Markdown Task & Project Manager for Developers and AI Agents"
 license = "MIT OR Apache-2.0"
 authors = ["Ken Harrison <ktreharrison@gmail.com>"]
 repository = "https://github.com/ktreharrison/taskmd"

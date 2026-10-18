@@ -316,3 +316,112 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
         _ => anyhow::bail!("Unknown MCP tool: {}", name),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::CardScope;
+    use crate::store::{AppConfig, ScopeSelection, TaskStore};
+    use std::fs;
+
+    fn setup_test_store(name: &str) -> (TaskStore, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("taskmd-mcp-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("tasks")).unwrap();
+
+        let cfg = AppConfig {
+            mode: "cli".to_string(),
+            vault_path: tmp.to_string_lossy().to_string(),
+            tasks_dir: "tasks".to_string(),
+            base_file: String::new(),
+            daily_dir: String::new(),
+            default_owner: "ken".to_string(),
+            obsidian_vault_name: None,
+            editor: None,
+        };
+
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: cfg,
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+        };
+        (store, tmp)
+    }
+
+    #[test]
+    fn test_mcp_tool_lifecycle() {
+        let (store, tmp) = setup_test_store("lifecycle");
+
+        // 1. Add task via MCP
+        let add_args = json!({
+            "shorthand": "p0 Test MCP tool integration +ci dur:1h",
+            "details": "Integration test for MCP",
+            "dod": ["Item 1", "Item 2"],
+            "eval": "exit 0",
+            "session_id": "test-agent-sess-123"
+        });
+        let add_res = handle_tool_call(&store, "task_add", &add_args).expect("task_add failed");
+        let added: Value = serde_json::from_str(&add_res).unwrap();
+        assert_eq!(added["id"], "tk-001");
+        assert_eq!(added["priority"], "P0");
+        assert_eq!(added["status"], "ready");
+
+        // 2. Claim task via MCP
+        let claim_args = json!({
+            "id": "1",
+            "owner": "claude",
+            "session_id": "claude -r 999"
+        });
+        let claim_res = handle_tool_call(&store, "task_claim", &claim_args).expect("task_claim failed");
+        let claimed: Value = serde_json::from_str(&claim_res).unwrap();
+        assert_eq!(claimed["status"], "in-progress");
+        assert_eq!(claimed["owner"], "claude");
+
+        // 3. Eval task via MCP
+        let eval_args = json!({
+            "id": "1",
+            "actor": "claude"
+        });
+        let eval_res = handle_tool_call(&store, "task_eval", &eval_args).expect("task_eval failed");
+        let eval_val: Value = serde_json::from_str(&eval_res).unwrap();
+        assert_eq!(eval_val["passed"], true);
+
+        // 4. Submit review via MCP
+        let rev_args = json!({
+            "id": "1",
+            "actor": "claude",
+            "note": "All checks verified"
+        });
+        let rev_res = handle_tool_call(&store, "task_submit_review", &rev_args).expect("task_submit_review failed");
+        let reviewed: Value = serde_json::from_str(&rev_res).unwrap();
+        assert_eq!(reviewed["status"], "pending-close");
+
+        // 5. Complete task via MCP
+        let comp_args = json!({
+            "id": "1",
+            "actor": "ken",
+            "note": "Signed off"
+        });
+        let comp_res = handle_tool_call(&store, "task_complete", &comp_args).expect("task_complete failed");
+        let completed: Value = serde_json::from_str(&comp_res).unwrap();
+        assert_eq!(completed["status"], "done");
+
+        // 6. CPM calculation via MCP
+        let cpm_res = handle_tool_call(&store, "task_cpm", &json!({})).expect("task_cpm failed");
+        let cpm_val: Value = serde_json::from_str(&cpm_res).unwrap();
+        assert_eq!(cpm_val["project_duration_seconds"], 3600);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_mcp_unknown_tool() {
+        let (store, tmp) = setup_test_store("unknown");
+        let res = handle_tool_call(&store, "non_existent_tool", &json!({}));
+        assert!(res.is_err());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+}
