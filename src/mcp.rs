@@ -62,7 +62,7 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
                     "protocolVersion": "2024-11-05",
                     "capabilities": { "tools": {} },
                     "serverInfo": {
-                        "name": "taskmd",
+                        "name": "tkmd",
                         "version": env!("CARGO_PKG_VERSION")
                     }
                 }
@@ -218,10 +218,10 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
             let filtered: Vec<_> = cards
                 .into_iter()
                 .filter(|c| {
-                    let owner_ok = owner_filter.map_or(true, |o| c.meta.owner.eq_ignore_ascii_case(o));
+                    let owner_ok = owner_filter.is_none_or(|o| c.meta.owner.eq_ignore_ascii_case(o));
                     let status_ok = status_filter
-                        .map_or(true, |s| c.meta.status.as_str().eq_ignore_ascii_case(s));
-                    let scope_ok = scope_filter.map_or(true, |s| match s.to_lowercase().as_str() {
+                        .is_none_or(|s| c.meta.status.as_str().eq_ignore_ascii_case(s));
+                    let scope_ok = scope_filter.is_none_or(|s| match s.to_lowercase().as_str() {
                         "local" => c.scope == crate::model::CardScope::Local,
                         "global" => c.scope == crate::model::CardScope::Global,
                         _ => true,

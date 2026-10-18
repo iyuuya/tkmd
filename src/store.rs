@@ -111,16 +111,18 @@ pub fn detect_local_store(cwd: &Path, global_vault_path: &Path) -> Option<PathBu
 
     loop {
         if let Some(ref g) = global_canon {
-            if let Ok(c) = cur.canonicalize() {
-                if c == *g {
+            if let Ok(c) = cur.canonicalize()
+                && c == *g {
                     return None;
                 }
-            }
         } else if cur == global_vault_path {
             return None;
         }
 
-        if cur.join(".taskmd.toml").is_file()
+        if cur.join(".tkmd.toml").is_file()
+            || cur.join("tkmd.toml").is_file()
+            || cur.join(".tkmd/config.toml").is_file()
+            || cur.join(".taskmd.toml").is_file()
             || cur.join("taskmd.toml").is_file()
             || cur.join(".taskmd/config.toml").is_file()
         {
@@ -266,7 +268,7 @@ impl Default for AppConfig {
         } else {
             Self {
                 mode: "cli".to_string(),
-                vault_path: format!("{}/.local/share/taskmd", home),
+                vault_path: format!("{}/.local/share/tkmd", home),
                 tasks_dir: "tasks".to_string(),
                 base_file: String::new(),
                 daily_dir: String::new(),
@@ -289,8 +291,16 @@ pub struct TaskStore {
 
 impl TaskStore {
     pub fn config_file_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/ken".to_string());
-        PathBuf::from(home).join(".config/taskmd/config.toml")
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let modern = PathBuf::from(&home).join(".config/tkmd/config.toml");
+        if modern.is_file() {
+            return modern;
+        }
+        let legacy = PathBuf::from(&home).join(".config/taskmd/config.toml");
+        if legacy.is_file() {
+            return legacy;
+        }
+        modern
     }
 
     pub fn load_global_store() -> Result<Self> {
@@ -348,7 +358,13 @@ impl TaskStore {
 
     pub fn load_local_store(root: &Path) -> Result<Self> {
         let user = std::env::var("USER").unwrap_or_else(|_| "ken".to_string());
-        let cfg_file = if root.join(".taskmd.toml").is_file() {
+        let cfg_file = if root.join(".tkmd.toml").is_file() {
+            Some(root.join(".tkmd.toml"))
+        } else if root.join("tkmd.toml").is_file() {
+            Some(root.join("tkmd.toml"))
+        } else if root.join(".tkmd/config.toml").is_file() {
+            Some(root.join(".tkmd/config.toml"))
+        } else if root.join(".taskmd.toml").is_file() {
             Some(root.join(".taskmd.toml"))
         } else if root.join("taskmd.toml").is_file() {
             Some(root.join("taskmd.toml"))
@@ -487,9 +503,9 @@ impl TaskStore {
         editor: Option<String>,
         is_local: bool,
     ) -> Result<(AppConfig, PathBuf)> {
-        let expanded = if target_path.starts_with("~/") {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/ken".to_string());
-            format!("{}/{}", home, &target_path[2..])
+        let expanded = if let Some(stripped) = target_path.strip_prefix("~/") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{}/{}", home, stripped)
         } else {
             target_path.to_string()
         };
@@ -663,7 +679,7 @@ views:
         };
 
         let cfg_path = if is_local {
-            root.join(".taskmd.toml")
+            root.join(".tkmd.toml")
         } else {
             Self::config_file_path()
         };
@@ -701,13 +717,12 @@ views:
 
     pub fn list_all(&self) -> Result<Vec<TaskCard>> {
         let mut cards = self.list_store_cards()?;
-        if self.active_scope == ScopeSelection::All {
-            if let Some(ref peer) = self.peer {
+        if self.active_scope == ScopeSelection::All
+            && let Some(ref peer) = self.peer {
                 let mut peer_cards = peer.list_store_cards()?;
                 cards.append(&mut peer_cards);
                 cards.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
             }
-        }
         Ok(cards)
     }
 
@@ -804,13 +819,11 @@ views:
             if clean_sid.is_some() || *existing == prefix_latest {
                 *existing = entry_str;
             }
-        } else if !card.meta.sessions.iter().any(|e| e.starts_with(&agent_prefix))
-            || clean_sid.is_some()
-        {
-            if !card.meta.sessions.contains(&entry_str) {
+        } else if (!card.meta.sessions.iter().any(|e| e.starts_with(&agent_prefix))
+            || clean_sid.is_some())
+            && !card.meta.sessions.contains(&entry_str) {
                 card.meta.sessions.push(entry_str);
             }
-        }
     }
 
     /// Synchronize `meta.sessions` and the `## Agent Sessions` Markdown section inside `card.body`
@@ -994,11 +1007,10 @@ views:
         };
 
         let mut sections = format!("# {}\n", meta.title);
-        if let Some(d) = details {
-            if !d.trim().is_empty() {
+        if let Some(d) = details
+            && !d.trim().is_empty() {
                 sections.push_str(&format!("\n{}\n", d.trim()));
             }
-        }
         if !dod.is_empty() {
             sections.push_str("\n## Definition of Done (DoD)\n");
             for item in &dod {
@@ -1056,11 +1068,9 @@ views:
 
         if (self.active_scope == ScopeSelection::Auto || self.active_scope == ScopeSelection::All)
             && let Some(ref peer) = self.peer
-        {
-            if let Ok(card) = peer.find_task(query) {
+            && let Ok(card) = peer.find_task(query) {
                 return Ok(card);
             }
-        }
 
         bail!("Task '{}' not found", query)
     }
@@ -1566,11 +1576,10 @@ views:
     }
 
     fn log_to_daily_note(&self, card: &TaskCard, note: Option<&str>) -> Result<()> {
-        if card.scope == CardScope::Global && self.scope != CardScope::Global {
-            if let Some(ref peer) = self.peer {
+        if card.scope == CardScope::Global && self.scope != CardScope::Global
+            && let Some(ref peer) = self.peer {
                 return peer.log_to_daily_note(card, note);
             }
-        }
         if self.config.mode == "cli" || self.config.daily_dir.trim().is_empty() {
             return Ok(());
         }
@@ -1628,7 +1637,7 @@ views:
                 &raw[..after_header],
                 if section.is_empty() { "\n" } else { section },
                 task_line,
-                &raw[next_sep..].trim_start_matches('\n')
+                raw[next_sep..].trim_start_matches('\n')
             )
         } else {
             format!("{}\n## Task List\n\n{}\n", raw.trim_end(), task_line)
@@ -1660,13 +1669,12 @@ views:
     /// Read all telemetry events from `tasks/.events.jsonl`.
     pub fn read_events(&self) -> Result<Vec<TaskEvent>> {
         let mut events = Self::read_events_from_path(&self.tasks_path)?;
-        if self.active_scope == ScopeSelection::All {
-            if let Some(ref peer) = self.peer {
+        if self.active_scope == ScopeSelection::All
+            && let Some(ref peer) = self.peer {
                 let mut peer_events = Self::read_events_from_path(&peer.tasks_path)?;
                 events.append(&mut peer_events);
                 events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
             }
-        }
         Ok(events)
     }
 
@@ -1707,10 +1715,9 @@ views:
                         let mut body_score = 0i64;
                         for tok in q.split_whitespace() {
                             let pat = tok.to_lowercase();
-                            if let Some(pos) = body_lower.find(&pat) {
+                            {
+                                let pos = body_lower.find(&pat)?;
                                 body_score += 100 - (pos.min(80) as i64);
-                            } else {
-                                return None;
                             }
                         }
                         Some(body_score)
@@ -1718,7 +1725,7 @@ views:
                 Some((score, c))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         Ok(scored.into_iter().map(|(_, c)| c).collect())
     }
 
@@ -1735,11 +1742,10 @@ views:
             if card.meta.status != TaskStatus::Done {
                 continue;
             }
-            if let Some(fid) = id_filter {
-                if !card.meta.id.eq_ignore_ascii_case(fid) {
+            if let Some(fid) = id_filter
+                && !card.meta.id.eq_ignore_ascii_case(fid) {
                     continue;
                 }
-            }
 
             let old_path = PathBuf::from(&card.path);
             let filename = old_path.file_name().context("Invalid card filename")?;
@@ -1775,11 +1781,10 @@ views:
             if card.meta.status != TaskStatus::Done && card.meta.status != TaskStatus::Archived {
                 continue;
             }
-            if let Some(fid) = id_filter {
-                if !card.meta.id.eq_ignore_ascii_case(fid) {
+            if let Some(fid) = id_filter
+                && !card.meta.id.eq_ignore_ascii_case(fid) {
                     continue;
                 }
-            }
 
             let path = PathBuf::from(&card.path);
             if path.exists() {
@@ -2074,5 +2079,185 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp_global);
         let _ = fs::remove_dir_all(&tmp_local);
+    }
+
+    #[test]
+    fn test_eval_gate_blocks_failing_command() {
+        let tmp = std::env::temp_dir().join(format!("taskmd-test-eval-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("tasks")).unwrap();
+
+        let cfg = AppConfig {
+            mode: "cli".to_string(),
+            vault_path: tmp.to_string_lossy().to_string(),
+            tasks_dir: "tasks".to_string(),
+            base_file: String::new(),
+            daily_dir: String::new(),
+            default_owner: "ken".to_string(),
+            obsidian_vault_name: None,
+            editor: None,
+        };
+
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: cfg,
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+        };
+
+        // Add task with failing eval command
+        let card = store
+            .add_task("p0 Failing task", None, vec!["dod item".to_string()], Some("exit 1".to_string()), None)
+            .unwrap();
+        assert_eq!(card.meta.status, TaskStatus::Ready);
+
+        // Submitting for review must fail!
+        let res = store.submit_for_review("1", "agent", Some("Finished work"), None);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Eval failed for tk-001"));
+
+        // Card status must still be ready
+        let reloaded = store.find_task("1").unwrap();
+        assert_eq!(reloaded.meta.status, TaskStatus::Ready);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_eval_gate_passes_valid_command() {
+        let tmp = std::env::temp_dir().join(format!("taskmd-test-eval-pass-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("tasks")).unwrap();
+
+        let cfg = AppConfig {
+            mode: "cli".to_string(),
+            vault_path: tmp.to_string_lossy().to_string(),
+            tasks_dir: "tasks".to_string(),
+            base_file: String::new(),
+            daily_dir: String::new(),
+            default_owner: "ken".to_string(),
+            obsidian_vault_name: None,
+            editor: None,
+        };
+
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: cfg,
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+        };
+
+        // Add task with passing eval command
+        store
+            .add_task("p0 Passing task", None, vec![], Some("echo 'all tests green' && exit 0".to_string()), None)
+            .unwrap();
+
+        // Submitting for review should succeed and transition to pending-close
+        let reviewed = store
+            .submit_for_review("1", "claude", Some("Ready for Ken"), Some("claude -r 123".to_string()))
+            .unwrap();
+        assert_eq!(reviewed.meta.status, TaskStatus::PendingClose);
+        assert_eq!(reviewed.meta.eval_status.as_deref(), Some("passed"));
+        assert!(reviewed.body.contains("PASS ✅"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_agent_guardrail_cannot_mark_done() {
+        let tmp = std::env::temp_dir().join(format!("taskmd-test-guardrail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("tasks")).unwrap();
+
+        let cfg = AppConfig {
+            mode: "cli".to_string(),
+            vault_path: tmp.to_string_lossy().to_string(),
+            tasks_dir: "tasks".to_string(),
+            base_file: String::new(),
+            daily_dir: String::new(),
+            default_owner: "ken".to_string(),
+            obsidian_vault_name: None,
+            editor: None,
+        };
+
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: cfg,
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+        };
+
+        store.add_task("p1 Agent work", None, vec![], None, None).unwrap();
+
+        // An AI agent attempts to directly complete the task
+        let res = store.complete_task("1", "claude", Some("I am done!")).unwrap();
+
+        // Guardrail MUST intercept and force status to pending-close (not done!)
+        assert_eq!(res.meta.status, TaskStatus::PendingClose);
+        assert_ne!(res.meta.status, TaskStatus::Done);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_human_sign_off_marks_done_and_checks_dod() {
+        let tmp = std::env::temp_dir().join(format!("taskmd-test-signoff-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("tasks")).unwrap();
+
+        let cfg = AppConfig {
+            mode: "cli".to_string(),
+            vault_path: tmp.to_string_lossy().to_string(),
+            tasks_dir: "tasks".to_string(),
+            base_file: String::new(),
+            daily_dir: String::new(),
+            default_owner: "ken".to_string(),
+            obsidian_vault_name: None,
+            editor: None,
+        };
+
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: cfg,
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+        };
+
+        // Add task with DoD checklist
+        let card = store
+            .add_task(
+                "p0 Deliverable",
+                None,
+                vec!["Unit tests pass".to_string(), "Docs written".to_string()],
+                Some("exit 0".to_string()),
+                None,
+            )
+            .unwrap();
+        assert!(card.body.contains("- [ ] Unit tests pass"));
+
+        // Agent submits for review
+        store.submit_for_review("1", "agent", Some("All ready"), None).unwrap();
+
+        // Human completes task
+        let done_card = store.complete_task("1", "ken", Some("LGTM approved")).unwrap();
+        assert_eq!(done_card.meta.status, TaskStatus::Done);
+        // DoD items must now be checked off (- [x])
+        assert!(done_card.body.contains("- [x] Unit tests pass"));
+        assert!(done_card.body.contains("- [x] Docs written"));
+
+        // Verify lifecycle event was written to .events.jsonl
+        let events = store.read_events().unwrap();
+        assert!(events.iter().any(|e| e.action == "completed" && e.to_status == "done" && e.actor == "ken"));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

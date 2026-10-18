@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::manual_clamp)]
+
 mod analytics;
 mod mcp;
 mod model;
@@ -5,7 +7,7 @@ mod store;
 mod todotxt;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use model::{CardScope, TaskCard, TaskStatus};
 use std::process::Command;
 use store::{ScopeSelection, TaskStore};
@@ -24,9 +26,9 @@ const PURPLE: &str = "\x1b[38;2;198;120;221m"; // #c678dd
 
 #[derive(Parser)]
 #[command(
-    name = "tk",
+    name = "tkmd",
     version,
-    about = "Markdown Program Engine for Human + AI Teams (CPM/DSM Graph Engine + Multi-Agent MCP)"
+    about = "Deterministic Program Management Engine & Multi-Agent MCP Server"
 )]
 struct Cli {
     /// Target repository-local project tasks only (./tasks)
@@ -45,7 +47,13 @@ struct Cli {
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+impl Cli {
+    pub fn scope(&self) -> ScopeSelection {
+        ScopeSelection::from_flags(self.local, self.global, self.all_scopes)
+    }
+}
+
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Add a task (alias: `a`), e.g.: tk a p1 Review EMBA notes +emba due:tomorrow
     #[command(visible_alias = "a")]
@@ -191,7 +199,7 @@ enum Commands {
         /// Optional Task ID (if omitted, opens `bases/tasks.base` in Obsidian or `tasks/` in $EDITOR)
         id: Option<String>,
     },
-    /// Initialize taskmd locally with Obsidian 1.14 (recommended) or standalone CLI mode
+    /// Initialize tkmd locally with Obsidian 1.14 (recommended) or standalone CLI mode
     Init {
         /// Set up with Obsidian 1.14 Kanban Base + Daily Notes + CLI + MCP (Recommended)
         #[arg(long, conflicts_with = "cli")]
@@ -199,7 +207,7 @@ enum Commands {
         /// Set up as standalone CLI-only plain Markdown directory (no Obsidian required)
         #[arg(long, conflicts_with = "obsidian")]
         cli: bool,
-        /// Initialize as project-local store (.taskmd.toml + ./tasks) in the current directory
+        /// Initialize as project-local store (.tkmd.toml + ./tasks) in the current directory
         #[arg(short = 'L', long)]
         local: bool,
         /// Target vault path (Obsidian mode) or directory path (CLI mode)
@@ -248,8 +256,8 @@ enum Commands {
         #[arg(short, long)]
         open: bool,
     },
-    /// Render dependency tree DAG for active tasks (alias: `tree`, also `tk dep tree`)
-    #[command(visible_alias = "tree")]
+    /// Render dependency tree DAG for active tasks (alias: `t`, also `tk dep tree`)
+    #[command(visible_alias = "t")]
     Tree {
         /// Optional task ID to inspect (e.g. 2 or tk-002)
         id: Option<String>,
@@ -257,8 +265,8 @@ enum Commands {
         #[arg(short, long)]
         project: Option<String>,
     },
-    /// Manage task dependencies (alias: `dep`), e.g. `tk dep 2 --needs 1` or `tk dep tree`
-    #[command(visible_alias = "dep")]
+    /// Manage task dependencies (alias: `deps`), e.g. `tk dep 2 --needs 1` or `tk dep tree`
+    #[command(visible_alias = "deps")]
     Dep {
         /// Dependent task ID (e.g. 2 or tk-002)
         id: Option<String>,
@@ -336,6 +344,16 @@ enum Commands {
     Mcp,
     /// Display brand banner and program metadata
     Banner,
+    /// Generate shell auto-completion script for zsh, bash, fish, powershell, or elvish (alias: `completion`)
+    #[command(visible_alias = "completion")]
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+        /// Target binary name (defaults to "tkmd", also supports "tk")
+        #[arg(short, long, default_value = "tkmd")]
+        bin: String,
+    },
 }
 
 #[repr(C)]
@@ -498,23 +516,29 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
         .filter(|c| c.meta.status == TaskStatus::PendingClose)
         .collect();
     if !pending_review.is_empty() {
-        println!(
-            "\n{BOLD}{PURPLE}🔍 AWAITING YOUR SIGN-OFF (pending-close: {}){RESET}  {scope_badge}",
-            pending_review.len()
-        );
+        if term_w >= 105 {
+            println!(
+                "\n{BOLD}{PURPLE}🔍 AWAITING YOUR SIGN-OFF (pending-close: {}){RESET}  {scope_badge}",
+                pending_review.len()
+            );
+        } else {
+            let compact_scope = if is_all {
+                "[All Scopes]"
+            } else {
+                match store.scope {
+                    CardScope::Local => "[Local]",
+                    CardScope::Global => "[Global]",
+                }
+            };
+            println!(
+                "\n{BOLD}{PURPLE}🔍 AWAITING YOUR SIGN-OFF (pending-close: {}){RESET}  {DIM}{compact_scope}{RESET}",
+                pending_review.len()
+            );
+        }
+
         for c in &pending_review {
             let short_id = c.meta.id.trim_start_matches("tk-0").trim_start_matches("tk-");
             let ev = c.meta.eval_status.as_deref().unwrap_or("no-eval");
-            let resume_hint = c
-                .meta
-                .resume_command()
-                .map(|cmd| format!(" · {AQUA}`{cmd}`{RESET}"))
-                .unwrap_or_default();
-            let resume_vis_len = c
-                .meta
-                .resume_command()
-                .map(|cmd| cmd.chars().count() + 5)
-                .unwrap_or(0);
             let scope_tag = if is_all {
                 match c.scope {
                     CardScope::Local => format!("{AQUA}[loc]{RESET} "),
@@ -525,37 +549,59 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
             };
             let scope_tag_len = if is_all { 6 } else { 0 };
 
-            if term_w >= 80 {
-                // Overhead: "  tk-002  P0  @hermes   [eval: passed] " (39) + " -> tk d 02" (11) = 50
-                let max_t = term_w.saturating_sub(51 + resume_vis_len + scope_tag_len).max(10);
+            if term_w >= 115 {
+                let ev_label = match ev {
+                    "passed (no-eval)" => "passed (auto)",
+                    other => other,
+                };
+                let resume_hint = c
+                    .meta
+                    .resume_command()
+                    .map(|cmd| format!(" · {AQUA}`{cmd}`{RESET}"))
+                    .unwrap_or_default();
+                let resume_vis_len = c
+                    .meta
+                    .resume_command()
+                    .map(|cmd| cmd.chars().count() + 5)
+                    .unwrap_or(0);
+                let overhead = 51 + resume_vis_len + scope_tag_len + ev_label.chars().count().saturating_sub(6);
+                let max_t = term_w.saturating_sub(overhead).max(10);
                 let t = truncate_str(&c.meta.title, max_t);
                 println!(
                     "  {BOLD}{:<6}{RESET} {} {} {DIM}[eval: {}]{RESET} {}{}{} {DIM}-> tk d {}{RESET}",
                     c.meta.id,
                     color_priority(&c.meta.priority),
                     color_owner(&c.meta.owner, 9),
-                    ev,
+                    ev_label,
                     scope_tag,
                     t,
                     resume_hint,
                     short_id
                 );
             } else {
-                // Compact banner for split-screen panes (< 80 cols)
-                // Overhead: "  tk-002 P0 [passed] " (21) + " -> tk d 02" (11) = 32
-                let max_t = term_w.saturating_sub(33 + scope_tag_len).max(8);
+                // Compact responsive layout for split-screen / non-fullscreen panes (< 115 cols)
+                let ev_badge = match ev {
+                    "passed" => format!("{GREEN}pass{RESET}"),
+                    "passed (no-eval)" => format!("{DIM}pass{RESET}"),
+                    "failed" => format!("{RED}fail{RESET}"),
+                    _ => format!("{DIM}none{RESET}"),
+                };
+                let overhead = 32 + scope_tag_len;
+                let max_t = term_w.saturating_sub(overhead).max(12);
                 let t = truncate_str(&c.meta.title, max_t);
                 println!(
                     "  {BOLD}{:<6}{RESET} {} {DIM}[{}]{RESET} {}{} {DIM}-> tk d {}{RESET}",
                     c.meta.id,
                     color_priority_compact(&c.meta.priority),
-                    ev,
+                    ev_badge,
                     scope_tag,
                     t,
                     short_id
                 );
                 if let Some(cmd) = c.meta.resume_command() {
-                    println!("         {DIM}↳ session:{RESET} {AQUA}{cmd}{RESET} {DIM}(or `tk u {short_id}`){RESET}");
+                    let max_cmd_w = term_w.saturating_sub(18).max(15);
+                    let truncated_cmd = truncate_str(&cmd, max_cmd_w);
+                    println!("         {DIM}↳ session:{RESET} {AQUA}{truncated_cmd}{RESET}");
                 }
             }
         }
@@ -764,7 +810,28 @@ fn print_review_card_summary(c: &TaskCard) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let scope_sel = ScopeSelection::from_flags(cli.local, cli.global, cli.all_scopes);
+
+    if let Some(Commands::Completions { shell, ref bin }) = cli.command {
+        let mut cmd = Cli::command();
+        cmd.set_bin_name(bin);
+        let mut buf = Vec::new();
+        clap_complete::generate(shell, &mut cmd, bin, &mut buf);
+        let s = String::from_utf8_lossy(&buf);
+        if bin == "tkmd" && shell == clap_complete::Shell::Zsh {
+            let mut customized = s.replacen("#compdef tkmd", "#compdef tkmd tk", 1);
+            customized = customized.replace(
+                "if [ \"$funcstack[1]\" = \"_tkmd\" ]; then",
+                "_tk() {\n    _tkmd \"$@\"\n}\n\nif [ \"$funcstack[1]\" = \"_tkmd\" ] || [ \"$funcstack[1]\" = \"_tk\" ]; then",
+            );
+            print!("{}", customized);
+            println!("\ncompdef _tkmd tk 2>/dev/null || true");
+        } else {
+            print!("{}", s);
+        }
+        return Ok(());
+    }
+
+    let scope_sel = cli.scope();
     let store = TaskStore::load_with_scope(scope_sel)?;
 
     match cli.command.unwrap_or(Commands::Ls {
@@ -810,11 +877,11 @@ fn main() -> Result<()> {
                     }
                     let owner_ok = owner
                         .as_deref()
-                        .map_or(true, |o| c.meta.owner.eq_ignore_ascii_case(o));
+                        .is_none_or(|o| c.meta.owner.eq_ignore_ascii_case(o));
                     let status_ok = status
                         .as_deref()
-                        .map_or(true, |s| c.meta.status.as_str().eq_ignore_ascii_case(s));
-                    let project_ok = project.as_deref().map_or(true, |p| {
+                        .is_none_or(|s| c.meta.status.as_str().eq_ignore_ascii_case(s));
+                    let project_ok = project.as_deref().is_none_or(|p| {
                         let p_lower = p.to_lowercase();
                         if p_lower == "global" || p_lower == "none" {
                             c.meta.project.is_none()
@@ -1080,8 +1147,8 @@ fn main() -> Result<()> {
                 "cli"
             } else if let Some(ref p) = path {
                 // If user passed --path without --obsidian/--cli, inspect `.obsidian` inside that path!
-                let expanded = if p.starts_with("~/") {
-                    format!("{}/{}", home, &p[2..])
+                let expanded = if let Some(stripped) = p.strip_prefix("~/") {
+                    format!("{}/{}", home, stripped)
                 } else {
                     p.clone()
                 };
@@ -1092,7 +1159,7 @@ fn main() -> Result<()> {
                 }
             } else {
                 let auto_mode = if detected_vault.is_some() { "1" } else { "2" };
-                println!("\n{BOLD}⚡ taskmd (`tk`) Local Setup Wizard{RESET}");
+                println!("\n{BOLD}⚡ tkmd (`tk`) Local Setup Wizard{RESET}");
                 if let Some(ref v) = detected_vault {
                     println!(
                         "  {DIM}Auto-detected `.obsidian` vault:{RESET} {GREEN}{}{RESET}",
@@ -1135,7 +1202,7 @@ fn main() -> Result<()> {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| format!("{}/Documents", home))
             } else {
-                format!("{}/.local/share/taskmd", home)
+                format!("{}/.local/share/tkmd", home)
             };
 
             let chosen_path = if let Some(p) = path {
@@ -1188,7 +1255,7 @@ fn main() -> Result<()> {
             )?;
 
             println!(
-                "\n{GREEN}✅ Initialized taskmd in {BOLD}{}{RESET}{GREEN} mode!{RESET}",
+                "\n{GREEN}✅ Initialized tkmd in {BOLD}{}{RESET}{GREEN} mode!{RESET}",
                 cfg.mode
             );
             println!("  {DIM}• Config:{RESET}      {}", cfg_path.display());
@@ -1210,8 +1277,8 @@ fn main() -> Result<()> {
             );
             println!(
                 r#"  "mcpServers": {{
-    "taskmd": {{
-      "command": "tk",
+    "tkmd": {{
+      "command": "tkmd",
       "args": ["mcp"]
     }}
   }}"#
@@ -1373,8 +1440,8 @@ fn main() -> Result<()> {
                         let div_line = "─".repeat(table_w);
 
                         println!(
-                            "  {BOLD_WHITE}{:<8} {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>6}  {:<21} {:<10} {:<10} {}{RESET}",
-                            "ID", "Dur", "ES", "EF", "LS", "LF", "Buffer", "Condition", "Owner", "Status", "Title"
+                            "  {BOLD_WHITE}{:<8} {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>6}  {:<21} {:<10} {:<10} Title{RESET}",
+                            "ID", "Dur", "ES", "EF", "LS", "LF", "Buffer", "Condition", "Owner", "Status"
                         );
                         println!("  {div_line}");
 
@@ -1420,8 +1487,8 @@ fn main() -> Result<()> {
                         let div_line = "─".repeat(table_w);
 
                         println!(
-                            "  {BOLD_WHITE}{:<7} {:<5} {:<5} {:<5} {:<6} {:<10} {:<8} {}{RESET}",
-                            "ID", "Dur", "ES", "EF", "Buffer", "Condition", "Owner", "Title"
+                            "  {BOLD_WHITE}{:<7} {:<5} {:<5} {:<5} {:<6} {:<10} {:<8} Title{RESET}",
+                            "ID", "Dur", "ES", "EF", "Buffer", "Condition", "Owner"
                         );
                         println!("  {div_line}");
 
@@ -1465,8 +1532,8 @@ fn main() -> Result<()> {
                         let div_line = "─".repeat(table_w);
 
                         println!(
-                            "  {BOLD_WHITE}{:<7} {:<4} {:<4} {:<4} {:<5} {}{RESET}",
-                            "ID", "ES", "EF", "Buf", "Cond", "Title"
+                            "  {BOLD_WHITE}{:<7} {:<4} {:<4} {:<4} {:<5} Title{RESET}",
+                            "ID", "ES", "EF", "Buf", "Cond"
                         );
                         println!("  {div_line}");
 
@@ -1817,11 +1884,11 @@ fn main() -> Result<()> {
                             c.meta.status == TaskStatus::InProgress
                                 && owner
                                     .as_deref()
-                                    .map_or(true, |o| c.meta.owner.eq_ignore_ascii_case(o))
+                                    .is_none_or(|o| c.meta.owner.eq_ignore_ascii_case(o))
                         })
                         .collect();
                     if !in_prog.is_empty() {
-                        println!("⚠️ [taskmd hook] The following task(s) are still `in-progress`:");
+                        println!("⚠️ [tkmd hook] The following task(s) are still `in-progress`:");
                         for c in in_prog {
                             println!(
                                 "  - {} (@{}): {} -> Run `tk eval {}` and `tk r {} -n \"summary\"` when ready for sign-off.",
@@ -1837,11 +1904,11 @@ fn main() -> Result<()> {
                             !matches!(c.meta.status, TaskStatus::Done | TaskStatus::Archived)
                                 && owner
                                     .as_deref()
-                                    .map_or(true, |o| c.meta.owner.eq_ignore_ascii_case(o))
+                                    .is_none_or(|o| c.meta.owner.eq_ignore_ascii_case(o))
                         })
                         .collect();
                     if !active.is_empty() {
-                        println!("[taskmd active queue ({})]:", active.len());
+                        println!("[tkmd active queue ({})]:", active.len());
                         for c in active {
                             let sess = c
                                 .meta
@@ -1899,17 +1966,18 @@ fn main() -> Result<()> {
         Commands::Banner => {
             let cyan = "\x1b[38;2;56;189;248m";
             let coral = "\x1b[38;2;244;63;94m";
-            println!("\n{}{BOLD}  ████████╗ █████╗ ███████╗██╗  ██╗{}{BOLD}███╗   ███╗██████╗ {RESET}", cyan, coral);
-            println!("{}{BOLD}  ╚══██╔══╝██╔══██╗██╔════╝██║ ██╔╝{}{BOLD}████╗ ████║██╔══██╗{RESET}", cyan, coral);
-            println!("{}{BOLD}     ██║   ███████║███████╗█████═╝ {}{BOLD}██╔████╔██║██║  ██║{RESET}", cyan, coral);
-            println!("{}{BOLD}     ██║   ██╔══██║╚════██║██╔═██╗ {}{BOLD}██║╚██╔╝██║██║  ██║{RESET}", cyan, coral);
-            println!("{}{BOLD}     ██║   ██║  ██║███████║██║ ╚██╗{}{BOLD}██║ ╚═╝ ██║██████╔╝{RESET}", cyan, coral);
-            println!("{}{BOLD}     ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝{}{BOLD}╚═╝     ╚═╝╚═════╝ {RESET}\n", cyan, coral);
-            println!("  {BOLD}taskmd{RESET} {DIM}v{}{RESET} • {BOLD}{BLUE}Markdown Program Engine for Human + AI Teams{RESET}", env!("CARGO_PKG_VERSION"));
+            println!("\n{}{BOLD}  ████████╗██╗  ██╗{}{BOLD}███╗   ███╗██████╗ {RESET}", cyan, coral);
+            println!("{}{BOLD}  ╚══██╔══╝██║ ██╔╝{}{BOLD}████╗ ████║██╔══██╗{RESET}", cyan, coral);
+            println!("{}{BOLD}     ██║   █████═╝ {}{BOLD}██╔████╔██║██║  ██║{RESET}", cyan, coral);
+            println!("{}{BOLD}     ██║   ██╔═██╗ {}{BOLD}██║╚██╔╝██║██║  ██║{RESET}", cyan, coral);
+            println!("{}{BOLD}     ██║   ██║ ╚██╗{}{BOLD}██║ ╚═╝ ██║██████╔╝{RESET}", cyan, coral);
+            println!("{}{BOLD}     ╚═╝   ╚═╝  ╚═╝{}{BOLD}╚═╝     ╚═╝╚═════╝ {RESET}\n", cyan, coral);
+            println!("  {BOLD}tkmd{RESET} {DIM}v{}{RESET} • {BOLD}{BLUE}Deterministic Program Management Engine & Multi-Agent MCP Server{RESET}", env!("CARGO_PKG_VERSION"));
             println!("  {DIM}Dual Licensed:{RESET} {GREEN}MIT OR Apache-2.0{RESET} • Copyright (c) 2026 Ken Harrison");
-            println!("  {DIM}MD Pillars:{RESET} {AQUA}Markdown{RESET} • {PURPLE}Managing Director{RESET} • {BLUE}Model-Driven{RESET} • {GREEN}Mission Delivery{RESET} • {ORANGE}Matrix & Dependencies{RESET}");
-            println!("  {DIM}Zero daemons • 100% local • Mathematical CPM & DSM • Universal MCP{RESET}\n");
+            println!("  {DIM}TKMD Pillars:{RESET} {AQUA}Task Markdown{RESET} • {PURPLE}Managing Director{RESET} • {BLUE}Model-Driven{RESET} • {GREEN}Mission Delivery{RESET} • {ORANGE}Matrix & Dependencies{RESET}");
+            println!("  {DIM}Zero daemons • 100% local • Mathematical CPM & DSM • Universal Stdio MCP{RESET}\n");
         }
+        Commands::Completions { .. } => unreachable!(),
     }
 
     Ok(())
@@ -1921,11 +1989,10 @@ fn render_dependency_tree(store: &TaskStore, target_id: Option<&str>, project: O
     println!("{DIM}────────────────────────────────────────────{RESET}");
     let mut has_deps = false;
     for c in &all_cards {
-        if let Some(p) = project {
-            if c.meta.project.as_deref() != Some(p) {
+        if let Some(p) = project
+            && c.meta.project.as_deref() != Some(p) {
                 continue;
             }
-        }
         if let Some(tid) = target_id {
             let clean_tid = tid.trim_start_matches("tk-").trim_start_matches('0');
             let clean_cid = c.meta.id.trim_start_matches("tk-").trim_start_matches('0');
@@ -1960,4 +2027,105 @@ fn render_dependency_tree(store: &TaskStore, target_id: Option<&str>, project: O
     }
     println!("{DIM}────────────────────────────────────────────{RESET}\n");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_parse_scope_flags() {
+        let cli_local = Cli::try_parse_from(["tk", "-L"]).unwrap();
+        assert_eq!(cli_local.scope(), ScopeSelection::Local);
+
+        let cli_global = Cli::try_parse_from(["tk", "-G"]).unwrap();
+        assert_eq!(cli_global.scope(), ScopeSelection::Global);
+
+        let cli_all = Cli::try_parse_from(["tk", "-A"]).unwrap();
+        assert_eq!(cli_all.scope(), ScopeSelection::All);
+
+        let cli_auto = Cli::try_parse_from(["tk"]).unwrap();
+        assert_eq!(cli_auto.scope(), ScopeSelection::Auto);
+    }
+
+    #[test]
+    fn test_cli_parse_review_command() {
+        // `tk r` (dashboard view, no id)
+        let cli_dash = Cli::try_parse_from(["tk", "r"]).unwrap();
+        match cli_dash.command {
+            Some(Commands::Review { id, .. }) => assert!(id.is_none()),
+            other => panic!("Expected Review, got {:?}", other),
+        }
+
+        // `tk r 1 -n "Ready for review"`
+        let cli_sub = Cli::try_parse_from(["tk", "r", "1", "-n", "Ready for review"]).unwrap();
+        match cli_sub.command {
+            Some(Commands::Review { id, note, .. }) => {
+                assert_eq!(id.as_deref(), Some("1"));
+                assert_eq!(note.as_deref(), Some("Ready for review"));
+            }
+            other => panic!("Expected Review with id, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_tree_and_dep_commands() {
+        // `tk tree`
+        let cli_tree = Cli::try_parse_from(["tk", "tree"]).unwrap();
+        match cli_tree.command {
+            Some(Commands::Tree { id, project }) => {
+                assert!(id.is_none());
+                assert!(project.is_none());
+            }
+            other => panic!("Expected Tree, got {:?}", other),
+        }
+
+        // `tk dep 2 --needs 1`
+        let cli_dep = Cli::try_parse_from(["tk", "dep", "2", "--needs", "1"]).unwrap();
+        match cli_dep.command {
+            Some(Commands::Dep { id, needs, .. }) => {
+                assert_eq!(id.as_deref(), Some("2"));
+                assert_eq!(needs, vec!["1"]);
+            }
+            other => panic!("Expected Dep, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_claim_and_resume() {
+        let cli_claim = Cli::try_parse_from(["tk", "c", "1", "--owner", "claude", "-s", "claude -r 999"]).unwrap();
+        match cli_claim.command {
+            Some(Commands::Claim { id, owner, session }) => {
+                assert_eq!(id, "1");
+                assert_eq!(owner, "claude");
+                assert_eq!(session.as_deref(), Some("claude -r 999"));
+            }
+            other => panic!("Expected Claim, got {:?}", other),
+        }
+
+        let cli_res = Cli::try_parse_from(["tk", "u", "1"]).unwrap();
+        match cli_res.command {
+            Some(Commands::Resume { id, .. }) => assert_eq!(id, "1"),
+            other => panic!("Expected Resume, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_format_title_cell() {
+        let cell = format_title_cell("Fix login screen", Some("[[auth]]"), 40);
+        assert!(cell.contains("Fix login screen"));
+        assert!(cell.contains("[[auth]]"));
+    }
+
+    #[test]
+    fn test_cli_parse_completions_command() {
+        let cli_comp = Cli::try_parse_from(["tkmd", "completions", "zsh"]).unwrap();
+        match cli_comp.command {
+            Some(Commands::Completions { shell, bin }) => {
+                assert_eq!(shell, clap_complete::Shell::Zsh);
+                assert_eq!(bin, "tkmd");
+            }
+            other => panic!("Expected Completions, got {:?}", other),
+        }
+    }
 }

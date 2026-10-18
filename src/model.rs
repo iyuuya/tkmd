@@ -184,16 +184,13 @@ fn default_true() -> bool {
 /// Scope of the task card: repository-local project task or global workspace/vault task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum CardScope {
     Local,
+    #[default]
     Global,
 }
 
-impl Default for CardScope {
-    fn default() -> Self {
-        Self::Global
-    }
-}
 
 impl std::fmt::Display for CardScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

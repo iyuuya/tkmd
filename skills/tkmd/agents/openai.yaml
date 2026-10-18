@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taskmd Orchestrator"
+  short_description: "Manage tasks, eval gates, and human sign-off via tk CLI and MCP"
+  default_prompt: "Use $taskmd to inspect active tasks, claim work, run eval assertions, and submit completed tasks to pending-close."

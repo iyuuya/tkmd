@@ -1,67 +1,110 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="taskmd logo" width="760">
+  <img src="assets/logo.svg" alt="tkmd logo" width="760">
 </p>
 
 <p align="center">
-  <b>Markdown Task &amp; Project Manager for Developers and AI Agents</b><br>
-  <i>Local plain-text cards • Critical path schedules • Built-in MCP for AI tools</i>
+  <b>Deterministic Program Engine for Developers and AI Agents</b><br>
+  <i>Local Markdown cards • Mathematical CPM &amp; DSM • Universal Stdio MCP</i>
 </p>
 
 ---
 
-## What is taskmd?
+## What is tkmd?
 
-**`taskmd` (`tk`) is a fast, local task manager for developers and AI coding agents.**
+**`tkmd` (CLI: `tk` / `tkmd`) is a deterministic program engine and multi-agent governance harness.**
 
-It stores every task as a plain Markdown file (`.md`) on your computer. It uses mathematical graph algorithms to schedule work, find blockers, and identify the Critical Path.
+It stores every task as a plain Markdown card (`.md`) with YAML frontmatter in `tasks/tk-XXX-*.md`. It uses mathematical graph algorithms (Critical Path Method and Design Structure Matrices) to schedule work, calculate slack buffers, and surface circular deadlocks.
 
-When you pair with AI coding agents (such as Claude Code, Codex, or Gemini), `taskmd` prevents agents from falsely claiming work is finished. Agents must run automated test commands (`eval`) and submit work for human review before a task can close.
+When you pair with AI coding agents (Claude Code, Codex, Gemini, OpenCode), `tkmd` prevents agents from falsely claiming work is finished. Agents must pass automated shell verification gates (`eval`) and submit work for human sign-off (`pending-close`) before a task can transition to `done`.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="taskmd interactive terminal recording" width="760">
+  <img src="assets/demo.gif" alt="tkmd interactive terminal recording" width="760">
 </p>
 
-### Why Use taskmd?
+### Why Use tkmd?
 
-- **100% Local & Offline**: No cloud accounts, no subscriptions, and zero background daemons. You own your data.
-- **AI Agent Guardrails**: AI agents cannot mark tasks as `done`. Agents must submit work to `pending-close` for human sign-off.
-- **Mathematical Scheduling**: `taskmd` calculates early start times, buffers, and the Critical Path (`tk dep --cpm`) without guessing.
-- **Blocker Detection**: View dependency trees (`tk tree`) and circular deadlocks (`tk dep --dsm`) directly in your terminal.
+- **100% Local & Offline**: No cloud accounts, no subscriptions, and zero background daemons. Single Rust binary with POSIX advisory file locking.
+- **AI Agent Guardrails**: Agents cannot close tasks. Agents submit work to `pending-close` with automated test proofs. Humans sign off.
+- **Mathematical Scheduling**: Calculates early start, early finish, slack, and the Critical Path (`tk dep --cpm`) deterministically.
+- **Blocker & Loop Detection**: View dependency trees (`tk tree`) and circular deadlocks (`tk dep --dsm`) in terminal colors.
 - **One-Command Session Resume**: Reopen the exact AI terminal session attached to any task (`tk u <id>`).
 - **Flexible Storage**: Manage repository-level tasks (`tk init -L`) or central Obsidian Kanban boards (`bases/tasks.base`).
 
-### The 5 Core Pillars (MD)
+### The 5 Core Pillars (TKMD)
 
-1. **Markdown**: Plain-text files you own. Edit cards with any text editor (`hx`, `nvim`, `micro`, `vim`).
-2. **Managing Director**: Executive sign-off gates (`pending-close`) and one-keystroke agent session resumption (`tk u`).
-3. **Model-Driven**: Native Model Context Protocol server (`tk mcp`) for Claude, Codex, Gemini, and Cursor.
+1. **Task Markdown**: Plain-text cards you own. Edit with any text editor (`hx`, `nvim`, `micro`, `vim`).
+2. **Managing Director**: Executive human sign-off gates (`pending-close`) and one-keystroke agent session resumption (`tk u`).
+3. **Model-Driven**: Native Model Context Protocol server (`tkmd mcp` or `tk mcp`) for Claude, Codex, Gemini, and Cursor.
 4. **Mission Delivery**: Automated verification test commands (`eval`) that must pass before review.
 5. **Matrix & Dependencies**: Exact Critical Path Method (CPM) schedules and Dependency Structure Matrices (DSM).
 
 It supports two first-class local setups:
 1. **Obsidian + CLI Mode (Recommended)** — Syncs 1:1 with an Obsidian `.base` Kanban board (`bases/tasks.base`), updates `.obsidian/types.json`, and logs completed tasks under `## Task List` in your Daily Note.
-2. **Standalone CLI Mode** — Pure plain-text Markdown cards in a local directory (`~/.local/share/taskmd/tasks` or `~/tasks`), opening directly in `$EDITOR` (`hx`, `nvim`, `micro`, `vim`) with zero Obsidian dependency.
+2. **Standalone CLI Mode** — Pure plain-text Markdown cards in a local directory (`~/.local/share/tkmd/tasks` or `~/tasks`), opening directly in `$EDITOR` (`hx`, `nvim`, `micro`, `vim`) with zero Obsidian dependency.
 
 ### 100% Local & Offline Privacy
-- **Zero Network**: `tk` makes zero network/HTTP requests and has zero telemetry beacons. No accounts, no cloud sync, no tracking.
+- **Zero Network**: `tkmd` makes zero network/HTTP requests and has zero telemetry beacons. No accounts, no cloud sync, no tracking.
 - **Plain-Text Data Ownership**: Every task is an open `.md` file; every event is an open `.jsonl` record on your local disk.
-- **Self-Contained Telemetry**: `tk st` computes Little's Law, MTTC, and TPM90 directly in Rust. DuckDB is **not required** to run `tk`, but because the event log is standard `.jsonl`, users can optionally run instant SQL queries with DuckDB (`duckdb -c "SELECT * FROM 'tasks/.events.jsonl'"`).
+- **Self-Contained Telemetry**: `tk st` computes Little's Law, MTTC, and TPM90 directly in Rust. DuckDB is **not required** to run `tkmd`, but because the event log is standard `.jsonl`, users can optionally run instant SQL queries with DuckDB (`duckdb -c "SELECT * FROM 'tasks/.events.jsonl'"`).
 
 ---
 
-## 1. Install `tk`
+## Autonomous Multi-Agent Planning & Orchestration
+
+`tkmd` acts as a deterministic scheduling and governance harness for teams of AI subagents. It solves the three hardest problems in multi-agent execution: **deadlocks**, **uncoordinated parallel writes**, and **premature completion claims**.
+
+```mermaid
+flowchart TD
+    subgraph Phase1["1. Autonomous Planning & Decomp"]
+        Lead["Lead Architect / Human"] -->|"Decomposes spec"| T1["Task 1: Core API\n(Status: ready)"]
+        Lead -->|"Declares dependency"| T2["Task 2: Frontend\n(Status: blocked by Task 1)"]
+        T1 -.->|"Mathematical CPM\n(tk dep --cpm)"| Critical["Critical Path: Task 1 → Task 2\nZero Slack"]
+    end
+
+    subgraph Phase2["2. Guarded Subagent Execution"]
+        T1 -->|"Claimed (tk c 1)"| Agent1["Backend Subagent\n(Attaches session ID)"]
+        Agent1 -->|"Shell eval passes ✅"| Gate["Review Gate: pending-close\n(tk r 1)"]
+        Gate -->|"Human Sign-Off (tk d 1)"| Done["Task 1: done"]
+    end
+
+    subgraph Phase3["3. Automatic Blocker Cascade"]
+        Done ==>|"Auto-unblocks"| T2Ready["Task 2: promoted to ready"]
+        T2Ready -->|"Claimed (tk c 2)"| Agent2["Frontend Subagent\n(Attaches session ID)"]
+    end
+
+    style Critical fill:#1e293b,stroke:#ef4444,stroke-width:2px,color:#f87171
+    style Done fill:#1e293b,stroke:#10b981,stroke-width:2px,color:#4ade80
+    style Gate fill:#1e293b,stroke:#f59e0b,stroke-width:2px,color:#fbbf24
+```
+
+### How the Multi-Agent Lifecycle Works
+
+1. **Topological Planning (No Circular Loops)**:
+   A lead architect agent decomposes an epic into tasks. Running `tk dep --dsm` runs cycle detection across the dependency matrix, catching circular deadlocks before coding starts.
+2. **Mathematical CPM Allocation**:
+   `tk dep --cpm` computes early start (ES), late finish (LF), and slack buffers. The orchestrator prioritizes subagents on zero-slack Critical Path tasks.
+3. **Collision-Free Concurrent Execution**:
+   Multiple subagents running concurrently across separate terminal panes or CLI processes claim independent tasks (`tk c <id>`). POSIX advisory file locking prevents write collisions without a database server.
+4. **Automated Verification Gates (`eval`)**:
+   Subagents cannot close tasks. A subagent must run automated verification (`tk eval <id>`) and submit work to `pending-close` (`tk r <id>`).
+5. **Cascade Unblocking & Session Resumption**:
+   When human sign-off marks a blocker `done` (`tk d <id>`), `tkmd` automatically promotes downstream blocked tasks to `ready`. If any subagent stalls, `tk u <id>` immediately resumes its conversation session.
+
+---
+
+## 1. Install `tkmd`
 
 ### Option A: Standalone Binary (No Rust Required)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ktreharrison/taskmd/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ktreharrison/tkmd/main/install.sh | sh
 ```
 
 ### Option B: Build from Source with Cargo (Rust)
 
 ```bash
-# Install directly from git:
-cargo install --git https://github.com/ktreharrison/taskmd.git
+# Install directly from crates.io (or git):
+cargo install tkmd
 
 # Or build locally from cloned repository:
 cargo install --path .
@@ -70,7 +113,27 @@ cargo install --path .
 Verify the binary is on your `$PATH`:
 
 ```bash
+tkmd --help
+# Or use the short alias:
 tk --help
+```
+
+### Shell Auto-Completion
+
+`tkmd` generates native completion scripts for Zsh, Bash, Fish, PowerShell, and Elvish. In Zsh, a single script enables tab-completion for both `tkmd` and `tk`:
+
+```bash
+# Zsh (add to ~/.zshrc for instant completion):
+eval "$(tkmd completions zsh)"
+
+# Or persist to your Zsh completion directory:
+tkmd completions zsh > ~/.zfunc/_tkmd
+
+# Bash:
+source <(tkmd completions bash)
+
+# Fish:
+tkmd completions fish > ~/.config/fish/completions/tkmd.fish
 ```
 
 ---
@@ -100,16 +163,16 @@ What this configures automatically:
   4. **Agent Queues** (`owner != "<you>"`)
   5. **Completed Tasks** (`status == "done"`)
 - Safely merges task property types (`id`, `status`, `priority`, `owner`, `project`, `due`, `dod`, `eval`, `eval_status`) into `.obsidian/types.json` without overwriting your existing vault properties.
-- Writes `~/.config/taskmd/config.toml` so `tk o` opens `bases/tasks.base` directly in Obsidian.
+- Writes `~/.config/tkmd/config.toml` so `tk o` opens `bases/tasks.base` directly in Obsidian.
 
 ### Option B: Standalone CLI Mode (No Obsidian Required)
 
 ```bash
-tk init --cli --path ~/.local/share/taskmd
+tk init --cli --path ~/.local/share/tkmd
 ```
 
 What this configures automatically:
-- Creates `~/.local/share/taskmd/tasks/` for Markdown task cards and `.events.jsonl`.
+- Creates `~/.local/share/tkmd/tasks/` for Markdown task cards and `.events.jsonl`.
 - Disables Obsidian URI calls and Daily Note mutations (`mode = "cli"`).
 - Routes `tk o` (`tk open`) and `tk e <id>` (`tk edit`) directly to your `$EDITOR` (defaults to Helix `hx`).
 
@@ -120,7 +183,7 @@ tk init -L
 ```
 
 What this configures automatically:
-- Writes `.taskmd.toml` in your current repository root.
+- Writes `.tkmd.toml` in your current repository root.
 - Creates `./tasks/` and `./tasks/.events.jsonl` local to the project.
 - Automatically detected by `tk` commands in that directory or its subdirectories.
 - Retains instant access to the central global vault via `-G` or merged view via `-A`.
@@ -129,11 +192,11 @@ What this configures automatically:
 
 ## 3. Scope Control (Local Project vs. Global Vault)
 
-`taskmd` seamlessly manages both local project-level backlogs and central global backlogs:
+`tkmd` seamlessly manages both local project-level backlogs and central global backlogs:
 
 | Flag | Scope | Description |
 | :--- | :--- | :--- |
-| *(default)* | Auto | Uses `./tasks` if inside a project with `.taskmd.toml` or `tasks/`; otherwise uses global vault |
+| *(default)* | Auto | Uses `./tasks` if inside a project with `.tkmd.toml` or `tasks/`; otherwise uses global vault |
 | `-L, --local` | Local | Force operation strictly on the current repository's `./tasks` backlog |
 | `-G, --global` | Global | Force operation strictly on the global central vault (`~/Documents/tasks`) |
 | `-A, --all-scopes` | Merged | Aggregate local and global tasks across dashboards, CPM schedules, and telemetry |
@@ -166,33 +229,33 @@ In merged view (`tk -A`), task IDs display distinct scope indicators (`tk-001L` 
 
 ---
 
-## 5. Connect AI Agents via MCP (`tk mcp`)
+## 5. Connect AI Agents via MCP (`tkmd mcp` or `tk mcp`)
 
-`tk mcp` runs a dual-framing JSON-RPC 2.0 MCP server over `stdio` (auto-detecting both newline-delimited JSON and `Content-Length` headers for universal compatibility across Claude Desktop, Codex, Gemini CLI, Cursor, Zed, OpenCode, and Pi).
+`tkmd mcp` runs a dual-framing JSON-RPC 2.0 MCP server over `stdio` (auto-detecting both newline-delimited JSON and `Content-Length` headers for universal compatibility across Claude Desktop, Codex, Gemini CLI, Cursor, Zed, OpenCode, and Pi).
 
 Add this to your agent's MCP configuration:
 
 ```json
 {
   "mcpServers": {
-    "taskmd": {
-      "command": "tk",
+    "tkmd": {
+      "command": "tkmd",
       "args": ["mcp"]
     }
   }
 }
 ```
 
-### Bundled Agent Skill (`skills/taskmd`)
+### Bundled Agent Skill (`skills/tkmd`)
 
-`taskmd` ships with a pre-configured agent skill in `skills/taskmd/SKILL.md` (and `skills/taskmd/agents/openai.yaml`).
+`tkmd` ships with a pre-configured agent skill in `skills/tkmd/SKILL.md` (and `skills/tkmd/agents/openai.yaml`).
 
 Install it into your agent workspace:
 
 ```bash
 # For Codex, Claude, Antigravity, OpenCode, Pi:
 mkdir -p ~/.agents/skills
-cp -r skills/taskmd ~/.agents/skills/
+cp -r skills/tkmd ~/.agents/skills/
 ```
 
 This enforces the task governance harness across all your agents:
@@ -221,7 +284,7 @@ duckdb -c "SELECT actor, count(*) as reviews, count(CASE WHEN eval_passed THEN 1
 
 ## 6. License
 
-`taskmd` is dual-licensed under:
+`tkmd` is dual-licensed under:
 
 - **MIT License** ([LICENSE-MIT](LICENSE-MIT))
 - **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))

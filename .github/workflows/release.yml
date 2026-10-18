@@ -16,21 +16,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            os: macos-13
-            bin: tk
-            archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
-            bin: tk
+            bin: tkmd
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            bin: tkmd
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            bin: tk
+            bin: tkmd
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            bin: tkmd
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            bin: tk.exe
+            bin: tkmd.exe
             archive: zip
 
     steps:
@@ -49,28 +53,31 @@ jobs:
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          BIN_PATH="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          BIN_PATH="target/${{ matrix.target }}/release/tkmd"
           if command -v strip >/dev/null 2>&1; then
             strip "${BIN_PATH}" || true
           fi
-          ARCHIVE_NAME="tk-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          tar -czf "${ARCHIVE_NAME}" -C "target/${{ matrix.target }}/release" "${{ matrix.bin }}"
-          shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
-          echo "ASSET=${ARCHIVE_NAME}" >> $GITHUB_ENV
+          ARCHIVE_NAME="tkmd-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          tar -czf "${ARCHIVE_NAME}" -C "target/${{ matrix.target }}/release" tkmd
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          else
+            shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          fi
 
       - name: Package artifacts (Windows)
         if: matrix.archive == 'zip'
-        shell: bash
+        shell: pwsh
         run: |
-          ARCHIVE_NAME="tk-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          7z a "${ARCHIVE_NAME}" "./target/${{ matrix.target }}/release/${{ matrix.bin }}"
-          shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
-          echo "ASSET=${ARCHIVE_NAME}" >> $GITHUB_ENV
+          $ARCHIVE_NAME = "tkmd-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "./target/${{ matrix.target }}/release/tkmd.exe" -DestinationPath $ARCHIVE_NAME -Force
+          $HASH = (Get-FileHash -Path $ARCHIVE_NAME -Algorithm SHA256).Hash.ToLower()
+          "$HASH  $ARCHIVE_NAME" | Out-File -FilePath "$ARCHIVE_NAME.sha256" -Encoding ascii
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            tk-${{ github.ref_name }}-${{ matrix.target }}.*
+            tkmd-${{ github.ref_name }}-${{ matrix.target }}.*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

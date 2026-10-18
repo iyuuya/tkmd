@@ -518,7 +518,7 @@ pub fn print_stats(store: &TaskStore, term_w: usize) -> Result<()> {
     // Section 3: Human vs. Agent Split
     println!("\n{BOLD}3. Human vs. AI Agent Split{RESET}");
     let mut owners_vec: Vec<_> = owner_counts.into_iter().collect();
-    owners_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    owners_vec.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (owner, cnt) in &owners_vec {
         let pct = (*cnt as f64 / total as f64) * 100.0;
         let filled = ((*cnt as f64 / total as f64) * (bar_w as f64 / 2.0)).round() as usize;
@@ -537,7 +537,7 @@ pub fn print_stats(store: &TaskStore, term_w: usize) -> Result<()> {
     // Section 4: Category / Project Split
     println!("\n{BOLD}4. Category & Project Split{RESET}");
     let mut cats_vec: Vec<_> = cat_counts.into_iter().collect();
-    cats_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    cats_vec.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (cat, cnt) in &cats_vec {
         let pct = (*cnt as f64 / total as f64) * 100.0;
         println!("   {AQUA}{:<20}{RESET} {:>2} ({:>3.0}%)", cat, cnt, pct);
@@ -946,7 +946,7 @@ pub fn generate_cpm_summary_long(duration: &str, critical_path: &[String], sched
                 t.blocked_by.join(" and ")
             ));
         }
-        s.push_str("\n");
+        s.push('\n');
     }
 
     s.push_str(&format!("{BOLD_WHITE}4. SCHEDULE BUFFERS (FLOAT / BUFFER){RESET}\n"));
@@ -959,7 +959,7 @@ pub fn generate_cpm_summary_long(duration: &str, critical_path: &[String], sched
                 t.id, t.title, t.buffer_display, format_duration_concise(t.early_start), format_duration_concise(t.late_start)
             ));
         }
-        s.push_str("\n");
+        s.push('\n');
     }
 
     s.push_str(&format!("{BOLD_WHITE}5. ACTION PLAN FOR AGENTS AND HUMANS{RESET}\n"));
@@ -1193,11 +1193,11 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
             }
         } else {
             match t.status.as_str() {
-                "done" | "archived" => (format!("{GREEN}"), false),
-                "pending-close" => (format!("{PURPLE}"), false),
+                "done" | "archived" => (GREEN.to_string(), false),
+                "pending-close" => (PURPLE.to_string(), false),
                 "in-progress" => (format!("{BOLD}{ORANGE}"), false),
-                "blocked" => (format!("{RED}"), false),
-                _ => (format!("{AQUA}"), false),
+                "blocked" => (RED.to_string(), false),
+                _ => (AQUA.to_string(), false),
             }
         };
 
