@@ -219,7 +219,7 @@ In merged view (`tk -A`), task IDs display distinct scope indicators (`tk-001L` 
 | `tk` | `tk` | Render the responsive terminal dashboard + `pending-close` review banner |
 | `tk watch` | `tk w` | Live auto-resizing dashboard (reflows on pane resize or file change) |
 | `tk review` | `tk r` | Dedicated sign-off dashboard displaying pending local and global tasks |
-| `tk review 1 -n "All checks green"` | `tk r 1` | Move task to `pending-close` (auto-runs `eval` gate + macOS notification) |
+| `tk review 1 -n "All checks green"` | `tk r 1` | Move task to `pending-close` (auto-runs `eval` gate) |
 | `tk done 1 -n "Verified"` | `tk d 1` | Sign off and close task (`status: done` + Daily Note entry in Obsidian mode) |
 | `tk add p1 Fix auth +app @ken due:tomorrow` | `tk a ...` | Create a task card using `todo.txt` shorthand (`p0`/`p1`/`p2`, `+project`, `sid:<id>`) |
 | `tk claim 1 --owner claude -s 8y9380573586` | `tk c 1` | Claim `tk-001` (`status: in-progress`) and attach agent `session_id` |

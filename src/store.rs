@@ -1299,26 +1299,7 @@ views:
             Some(true),
             &card.meta.title,
         )?;
-        Self::notify_macos(
-            &format!("🔍 {} Awaiting Sign-Off (@{})", card.meta.id, actor),
-            &card.meta.title,
-        );
         Ok(card)
-    }
-
-    /// Non-blocking macOS notification hook when an agent submits a task to `pending-close`.
-    #[allow(unused_variables)]
-    fn notify_macos(title: &str, body: &str) {
-        #[cfg(target_os = "macos")]
-        {
-            let safe_title = title.replace('"', "\\\"");
-            let safe_body = body.replace('"', "\\\"");
-            let script = format!(
-                "display notification \"{}\" with title \"{}\"",
-                safe_body, safe_title
-            );
-            let _ = Command::new("osascript").arg("-e").arg(script).spawn();
-        }
     }
 
     /// Completes a task (`status: done`).
@@ -1421,10 +1402,6 @@ views:
                         "ready",
                         None,
                         &other.meta.title,
-                    );
-                    Self::notify_macos(
-                        &format!("🔓 {} Auto-Unblocked -> Ready", other.meta.id),
-                        &format!("{} is now ready to claim", other.meta.title),
                     );
                 }
             }
