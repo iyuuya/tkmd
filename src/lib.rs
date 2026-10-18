@@ -1650,7 +1650,7 @@ pub fn run() -> Result<()> {
                 println!("```mermaid");
                 println!("gantt");
                 println!("    dateFormat YYYY-MM-DD");
-                println!("    title Taskmd Execution Schedule");
+                println!("    title TKMD Execution Schedule");
                 println!("    axisFormat %m-%d\n");
 
                 for status in &[

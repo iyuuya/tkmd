@@ -488,7 +488,7 @@ pub fn print_stats(store: &TaskStore, term_w: usize) -> Result<()> {
     let bar_w = term_w.saturating_sub(10).clamp(20, 60);
     let divider = "─".repeat(term_w.saturating_sub(4).clamp(30, 90));
 
-    println!("\n{BOLD}📊 TASKMD TELEMETRY & HARNESS ANALYTICS{RESET}");
+    println!("\n{BOLD}📊 TKMD TELEMETRY & HARNESS ANALYTICS{RESET}");
     println!("{DIM}{divider}{RESET}");
 
     // Section 1: Counts & Queue State
