@@ -1162,9 +1162,32 @@ views:
             return Ok((card, true, "No eval command configured (auto-pass)".to_string()));
         };
 
-        let output = Command::new("zsh")
-            .arg("-c")
-            .arg(&cmd_str)
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&cmd_str);
+            c
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = {
+            let shell = if let Ok(s) = std::env::var("SHELL")
+                && !s.is_empty()
+                && std::path::Path::new(&s).exists()
+            {
+                s
+            } else if std::path::Path::new("/bin/bash").exists() {
+                "/bin/bash".to_string()
+            } else if std::path::Path::new("/bin/zsh").exists() {
+                "/bin/zsh".to_string()
+            } else {
+                "sh".to_string()
+            };
+            let mut c = Command::new(shell);
+            c.arg("-c").arg(&cmd_str);
+            c
+        };
+
+        let output = cmd
             .current_dir(&self.config.vault_path)
             .output()
             .with_context(|| format!("Failed to execute eval command: {}", cmd_str))?;
@@ -1283,6 +1306,7 @@ views:
     }
 
     /// Non-blocking macOS notification hook when an agent submits a task to `pending-close`.
+    #[allow(unused_variables)]
     fn notify_macos(title: &str, body: &str) {
         #[cfg(target_os = "macos")]
         {

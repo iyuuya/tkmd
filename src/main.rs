@@ -356,6 +356,7 @@ enum Commands {
     },
 }
 
+#[cfg(not(target_os = "windows"))]
 #[repr(C)]
 struct WinSize {
     ws_row: u16,
@@ -364,6 +365,7 @@ struct WinSize {
     ws_ypixel: u16,
 }
 
+#[cfg(not(target_os = "windows"))]
 unsafe extern "C" {
     fn ioctl(fd: i32, request: u64, ...) -> i32;
 }
@@ -376,24 +378,31 @@ fn terminal_width() -> usize {
     {
         return n;
     }
-    #[cfg(target_os = "macos")]
-    const TIOCGWINSZ: u64 = 0x4008_7468;
-    #[cfg(not(target_os = "macos"))]
-    const TIOCGWINSZ: u64 = 0x5413;
 
-    for fd in [1, 0, 2] {
-        let mut ws = WinSize {
-            ws_row: 0,
-            ws_col: 0,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let rc = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws) };
-        if rc == 0 && ws.ws_col >= 30 {
-            return ws.ws_col as usize;
+    #[cfg(target_os = "windows")]
+    return 100;
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(target_os = "macos")]
+        const TIOCGWINSZ: u64 = 0x4008_7468;
+        #[cfg(not(target_os = "macos"))]
+        const TIOCGWINSZ: u64 = 0x5413;
+
+        for fd in [1, 0, 2] {
+            let mut ws = WinSize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let rc = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws) };
+            if rc == 0 && ws.ws_col >= 30 {
+                return ws.ws_col as usize;
+            }
         }
+        100
     }
-    100
 }
 
 /// Truncate a string to `max_chars` visible characters, adding `…` if truncated.
