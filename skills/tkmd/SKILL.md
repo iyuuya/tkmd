@@ -83,7 +83,24 @@ All active tasks live as atomic Markdown cards in `tasks/tk-XXX-*.md` (and rende
      tk open 1       # Opens markdown card directly in Obsidian
      ```
 
+## Task Scopes (Local Repository vs. Global Vault)
+
+`tkmd` supports multi-scope backlogs:
+- **Default (Auto)**: Inside a project repository with `./tasks`, `tk` scopes to the local repository. Outside, it defaults to the global vault (`~/Documents/tasks`).
+- **`-G, --global`**: Explicitly target the central vault (`~/Documents/tasks`):
+  ```bash
+  tk -G ls            # List global tasks
+  tk -G r             # View global review queue
+  tk -G a p1 Title    # Add task to global vault
+  ```
+- **`-L, --local`**: Force operation strictly on the current repository's `./tasks`.
+- **`-A, --all-scopes`**: Merge and view both local repository and global vault tasks:
+  ```bash
+  tk -A ls            # View merged task board
+  tk -A r             # View merged review queue across all scopes
+  ```
 ## Hooks (`tk hook`)
+
 
 - **SessionStart / UserPromptSubmit Hook**:
   ```bash
