@@ -528,6 +528,8 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
         ScopeSelection::Auto => {
             if store.scope == CardScope::Local {
                 format!("{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks) · use -A for all, -G for global]{RESET}")
+            } else if store.uninitialized_git_repo.is_some() {
+                format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Git repo without ./tasks · run {AQUA}tk init -L{RESET}{DIM} to init]{RESET}")
             } else {
                 format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · use -L for local]{RESET}")
             }
@@ -798,6 +800,10 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
         }
         println!("{DIM}╰────────┴───────┴{}╯{RESET}", title_bar);
     }
+
+    if store.uninitialized_git_repo.is_some() {
+        println!("{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}\n");
+    }
 }
 
 fn print_review_dashboard(store: &TaskStore) -> Result<()> {
@@ -814,6 +820,8 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
         ScopeSelection::Auto => {
             if store.scope == CardScope::Local {
                 format!("{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks) · Use -A for all, -G for global]{RESET}")
+            } else if store.uninitialized_git_repo.is_some() {
+                format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Git repo without ./tasks · run {AQUA}tk init -L{RESET}{DIM} to init]{RESET}")
             } else {
                 format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Use -L for local]{RESET}")
             }
@@ -841,7 +849,11 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
             }
         }
         println!("{GREEN}  ✨ No tasks awaiting sign-off! All tasks are clear or done.{RESET}");
-        println!("  {DIM}Submit a task for review with: tk r <id> -n \"Summary\"{RESET}\n");
+        println!("  {DIM}Submit a task for review with: tk r <id> -n \"Summary\"{RESET}");
+        if store.uninitialized_git_repo.is_some() {
+            println!("{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}");
+        }
+        println!();
         return Ok(());
     }
 
@@ -862,7 +874,11 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
         }
     }
 
-    println!("\n{DIM}Sign-off and complete with:{RESET}  {AQUA}tk d <id>{RESET}  {DIM}(or `tk d <id> -n \"LGTM\"`){RESET}\n");
+    println!("\n{DIM}Sign-off and complete with:{RESET}  {AQUA}tk d <id>{RESET}  {DIM}(or `tk d <id> -n \"LGTM\"`){RESET}");
+    if store.uninitialized_git_repo.is_some() {
+        println!("{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}");
+    }
+    println!();
     Ok(())
 }
 

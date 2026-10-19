@@ -288,6 +288,7 @@ pub struct TaskStore {
     pub scope: CardScope,
     pub peer: Option<Box<TaskStore>>,
     pub active_scope: ScopeSelection,
+    pub uninitialized_git_repo: Option<PathBuf>,
 }
 
 impl TaskStore {
@@ -354,6 +355,7 @@ impl TaskStore {
             scope: CardScope::Global,
             peer: None,
             active_scope: ScopeSelection::Global,
+            uninitialized_git_repo: None,
         })
     }
 
@@ -421,6 +423,7 @@ impl TaskStore {
             scope: CardScope::Local,
             peer: None,
             active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
         })
     }
 
@@ -469,6 +472,7 @@ impl TaskStore {
                 } else {
                     let mut store = global;
                     store.active_scope = ScopeSelection::Auto;
+                    store.uninitialized_git_repo = detect_git_root(&cwd);
                     Ok(store)
                 }
             }
@@ -1922,6 +1926,7 @@ mod tests {
             scope: CardScope::Global,
             peer: None,
             active_scope: ScopeSelection::Global,
+            uninitialized_git_repo: None,
         };
         fs::create_dir_all(&store.tasks_path).unwrap();
 
@@ -1982,6 +1987,7 @@ mod tests {
             scope: CardScope::Global,
             peer: None,
             active_scope: ScopeSelection::Global,
+            uninitialized_git_repo: None,
         });
         fs::create_dir_all(&store.tasks_path).unwrap();
 
@@ -2057,6 +2063,7 @@ mod tests {
             scope: CardScope::Global,
             peer: None,
             active_scope: ScopeSelection::Global,
+            uninitialized_git_repo: None,
         };
         let mut local_store = TaskStore {
             tasks_path: tmp_local.join("tasks"),
@@ -2065,6 +2072,7 @@ mod tests {
             scope: CardScope::Local,
             peer: Some(Box::new(global_store)),
             active_scope: ScopeSelection::All,
+            uninitialized_git_repo: None,
         };
 
         // Add task to local store
@@ -2115,6 +2123,7 @@ mod tests {
             scope: CardScope::Local,
             peer: None,
             active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
         };
 
         // Add task with failing eval command
@@ -2160,6 +2169,7 @@ mod tests {
             scope: CardScope::Local,
             peer: None,
             active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
         };
 
         // Add task with passing eval command
@@ -2202,6 +2212,7 @@ mod tests {
             scope: CardScope::Local,
             peer: None,
             active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
         };
 
         store.add_task("p1 Agent work", None, vec![], None, None).unwrap();
@@ -2247,6 +2258,7 @@ mod tests {
             scope: CardScope::Local,
             peer: None,
             active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
         };
 
         // Add task with DoD checklist

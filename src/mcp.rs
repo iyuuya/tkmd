@@ -347,6 +347,7 @@ mod tests {
             scope: CardScope::Local,
             peer: None,
             active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
         };
         (store, tmp)
     }
