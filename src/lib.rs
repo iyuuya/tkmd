@@ -1064,8 +1064,8 @@ pub fn run() -> Result<()> {
         Commands::Done { id, actor, note } => {
             let card = store.complete_task(&id, &actor, note.as_deref())?;
             println!(
-                "{GREEN}✅ Completed{RESET} {BOLD}{}{RESET} ({}) and logged to today's Daily Note!",
-                card.meta.id, card.meta.title
+                "{}",
+                done_message(&card.meta.status, &card.meta.id, &card.meta.title)
             );
         }
         Commands::Edit { id } => {
@@ -2037,9 +2037,41 @@ fn render_dependency_tree(store: &TaskStore, target_id: Option<&str>, project: O
     Ok(())
 }
 
+/// Message for `tk done`. Says `Completed` only when the card is actually done.
+/// Agent completions stop at `pending-close` and wait for human sign-off.
+fn done_message(status: &TaskStatus, id: &str, title: &str) -> String {
+    if *status == TaskStatus::Done {
+        format!(
+            "{GREEN}✅ Completed{RESET} {BOLD}{}{RESET} ({}) and logged to today's Daily Note!",
+            id, title
+        )
+    } else {
+        format!(
+            "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` (eval passed): {}. Human sign-off is next.",
+            id, title
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_done_message_pending_close() {
+        let msg = done_message(&TaskStatus::PendingClose, "tk-003", "Fix bug");
+        assert!(msg.contains("Submitted"));
+        assert!(msg.contains("pending-close"));
+        assert!(msg.contains("Human sign-off"));
+        assert!(!msg.contains("Completed"));
+    }
+
+    #[test]
+    fn test_done_message_done() {
+        let msg = done_message(&TaskStatus::Done, "tk-003", "Fix bug");
+        assert!(msg.contains("Completed"));
+        assert!(!msg.contains("Submitted"));
+    }
 
     #[test]
     fn test_cli_parse_scope_flags() {
