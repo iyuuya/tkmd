@@ -7,10 +7,30 @@ mod store;
 mod todotxt;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::builder::styling::{AnsiColor, Effects, Styles};
+use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
 use model::{CardScope, TaskCard, TaskStatus};
 use std::process::Command;
 use store::{ScopeSelection, TaskStore};
+
+fn get_color_choice() -> ColorChoice {
+    if std::env::var("NO_COLOR").is_ok() {
+        ColorChoice::Never
+    } else {
+        ColorChoice::Always
+    }
+}
+
+fn cli_styles() -> Styles {
+    Styles::styled()
+        .header(AnsiColor::BrightGreen.on_default().effects(Effects::BOLD))
+        .usage(AnsiColor::BrightGreen.on_default().effects(Effects::BOLD))
+        .literal(AnsiColor::BrightCyan.on_default().effects(Effects::BOLD))
+        .placeholder(AnsiColor::Cyan.on_default())
+        .valid(AnsiColor::BrightGreen.on_default())
+        .invalid(AnsiColor::Yellow.on_default())
+        .error(AnsiColor::Red.on_default().effects(Effects::BOLD))
+}
 
 // ANSI colors tuned to Ken's Starship palette (`ken-custom`)
 const RESET: &str = "\x1b[0m";
@@ -28,7 +48,9 @@ const PURPLE: &str = "\x1b[38;2;198;120;221m"; // #c678dd
 #[command(
     name = "tkmd",
     version,
-    about = "Deterministic Program Management Engine & Multi-Agent MCP Server"
+    about = "Deterministic Program Management Engine & Multi-Agent MCP Server",
+    styles = cli_styles(),
+    color = get_color_choice()
 )]
 struct Cli {
     /// Target repository-local project tasks only (./tasks)
