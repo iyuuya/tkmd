@@ -242,6 +242,7 @@ Primary MCP tools:
 - `task_claim`: Assign an agent and record a session ID.
 - `task_eval`: Run automated shell test commands.
 - `task_submit_review`: Move a task to `pending-close` with notes and artifact links.
+- `task_list` returns compact summaries (no body) unless `detail: "full"`; `limit` caps the count. `task_get` returns one full card.
 - `task_cpm`: Return project duration, critical path sequence, and task buffers.
 
 Agents use typed MCP tool calls to read and update task states. This maintains deterministic coordination across different AI models.

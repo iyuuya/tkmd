@@ -79,14 +79,27 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
                     "tools": [
                         {
                             "name": "task_list",
-                            "description": "List tasks across local project repository and/or central global vault with optional status, owner, or scope filter.",
+                            "description": "List tasks across local project repository and/or central global vault with optional status, owner, or scope filter. Returns compact summaries (no body); use task_get for one full card or detail='full' for all.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
+                                    "detail": { "type": "string", "enum": ["summary", "full"], "description": "summary (default): id, title, status, owner, priority, project, due, blockers, eval state, auto-accept, resume. full: complete cards including body." },
+                                    "limit": { "type": "integer", "minimum": 1, "description": "Return at most this many tasks (sorted by id)" },
                                     "owner": { "type": "string", "description": "Filter by owner (e.g. ken, hermes, pi, codex)" },
                                     "status": { "type": "string", "description": "Filter by status (inbox, ready, in-progress, pending-close, blocked, done)" },
                                     "scope": { "type": "string", "enum": ["local", "global", "all"], "description": "Filter by task scope: 'local' (repository project backlog), 'global' (central vault backlog), or 'all' (merged)" }
                                 }
+                            }
+                        },
+                        {
+                            "name": "task_get",
+                            "description": "Get one task as a full card (frontmatter, body, execution log, sessions, review receipt).",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string", "description": "Task ID (e.g. 7 or tk-007)" }
+                                },
+                                "required": ["id"]
                             }
                         },
                         {
@@ -217,6 +230,38 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
     Ok(())
 }
 
+/// What an agent needs to pick and route work, without the card body. Empty fields are omitted.
+fn card_summary(c: &crate::model::TaskCard) -> Value {
+    let m = &c.meta;
+    let mut v = json!({
+        "id": m.id,
+        "title": m.title,
+        "status": m.status.as_str(),
+        "owner": m.owner,
+        "priority": m.priority,
+    });
+    let obj = v.as_object_mut().expect("summary is an object");
+    if let Some(p) = &m.project {
+        obj.insert("project".into(), json!(p));
+    }
+    if let Some(d) = &m.due {
+        obj.insert("due".into(), json!(d));
+    }
+    if !m.blocked_by.is_empty() {
+        obj.insert("blocked_by".into(), json!(m.blocked_by));
+    }
+    if let Some(e) = &m.eval_status {
+        obj.insert("eval_status".into(), json!(e));
+    }
+    if m.approved_eval.is_some() {
+        obj.insert("auto_accept".into(), json!(true));
+    }
+    if let Some(r) = m.resume_command() {
+        obj.insert("resume".into(), json!(r));
+    }
+    v
+}
+
 fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<String> {
     match name {
         "task_list" => {
@@ -238,8 +283,21 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
                     });
                     owner_ok && status_ok && scope_ok
                 })
+                .take(
+                    args.get("limit")
+                        .and_then(|v| v.as_u64())
+                        .map_or(usize::MAX, |n| n as usize),
+                )
                 .collect();
-            Ok(serde_json::to_string_pretty(&filtered)?)
+            if args.get("detail").and_then(|v| v.as_str()) == Some("full") {
+                return Ok(serde_json::to_string_pretty(&filtered)?);
+            }
+            let summaries: Vec<Value> = filtered.iter().map(card_summary).collect();
+            Ok(serde_json::to_string(&summaries)?)
+        }
+        "task_get" => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            Ok(serde_json::to_string_pretty(&store.find_task(id)?)?)
         }
         "task_add" => {
             let shorthand = args.get("shorthand").and_then(|v| v.as_str()).unwrap_or("");
@@ -439,6 +497,85 @@ mod tests {
         let (store, tmp) = setup_test_store("unknown");
         let res = handle_tool_call(&store, "non_existent_tool", &json!({}));
         assert!(res.is_err());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_task_list_returns_compact_summaries_by_default() {
+        let (store, tmp) = setup_test_store("summary");
+        for i in 0..5 {
+            store
+                .add_task(
+                    &format!("p1 Summary task {} +proj", i),
+                    Some(
+                        "A long body that agents should not pay for in a listing. "
+                            .repeat(10)
+                            .as_str(),
+                    ),
+                    vec!["one".into(), "two".into()],
+                    Some("exit 0".into()),
+                    None,
+                )
+                .unwrap();
+        }
+        let res = handle_tool_call(&store, "task_list", &json!({})).unwrap();
+        let list: Value = serde_json::from_str(&res).unwrap();
+        let items = list.as_array().unwrap();
+        assert_eq!(items.len(), 5);
+        for item in items {
+            assert!(
+                item.get("body").is_none(),
+                "summary must not include the body: {}",
+                item
+            );
+            assert!(item.get("sessions").is_none());
+            for key in ["id", "title", "status", "owner", "priority"] {
+                assert!(item.get(key).is_some(), "summary missing {}: {}", key, item);
+            }
+        }
+        let per_card = res.len() / items.len();
+        assert!(per_card < 400, "summary is {} bytes per card", per_card);
+
+        let full = handle_tool_call(&store, "task_list", &json!({"detail": "full"})).unwrap();
+        let full: Value = serde_json::from_str(&full).unwrap();
+        assert!(
+            full[0].get("body").is_some(),
+            "detail=full must include the body"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_task_get_returns_one_full_card() {
+        let (store, tmp) = setup_test_store("get");
+        store
+            .add_task("p1 Fetch me", Some("the details"), vec![], None, None)
+            .unwrap();
+        let res = handle_tool_call(&store, "task_get", &json!({"id": "1"})).unwrap();
+        let card: Value = serde_json::from_str(&res).unwrap();
+        assert_eq!(card["id"], "tk-001");
+        assert!(card["body"].as_str().unwrap().contains("the details"));
+        assert!(handle_tool_call(&store, "task_get", &json!({"id": "99"})).is_err());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_task_list_limit() {
+        let (store, tmp) = setup_test_store("limit");
+        for i in 0..4 {
+            store
+                .add_task(&format!("p1 t{}", i), None, vec![], None, None)
+                .unwrap();
+        }
+        let res = handle_tool_call(&store, "task_list", &json!({"limit": 2})).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&res)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }
