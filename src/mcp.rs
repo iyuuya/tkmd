@@ -348,6 +348,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Local,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
         (store, tmp)
     }

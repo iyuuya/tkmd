@@ -536,6 +536,24 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
         }
     };
 
+    if store.is_uninitialized_local {
+        println!("{ORANGE}  ⚠ No local task tracking in this project (no ./tasks directory).{RESET}  {scope_badge}");
+        println!("  {DIM}↳ Initialize with:{RESET} {AQUA}tk init -L{RESET}  {DIM}(or run tk -G for global tasks){RESET}");
+        if let Some(ref peer) = store.peer
+            && let Ok(peer_cards) = peer.list_store_cards()
+        {
+            let peer_active: Vec<_> = peer_cards
+                .iter()
+                .filter(|c| c.meta.status != TaskStatus::Done && c.meta.status != TaskStatus::Archived)
+                .collect();
+            if !peer_active.is_empty() {
+                println!("  {DIM}↳ Your global vault has {BOLD}{}{RESET}{DIM} active tasks (run {AQUA}tk -G{RESET}{DIM} to view){RESET}", peer_active.len());
+            }
+        }
+        println!();
+        return;
+    }
+
     if cards.is_empty() {
         if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {
             if let Some(ref peer) = store.peer
@@ -831,6 +849,24 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
     println!("\n{BOLD_WHITE}══════════════════════════════════════════════════════════════════════════════{RESET}");
     println!("{BOLD}{PURPLE}📋 TASK SIGN-OFF & REVIEW QUEUE{RESET}  {scope_badge}");
     println!("{BOLD_WHITE}══════════════════════════════════════════════════════════════════════════════{RESET}");
+
+    if store.is_uninitialized_local {
+        println!("{ORANGE}  ⚠ No local task tracking in this project (no ./tasks directory).{RESET}");
+        println!("  {DIM}↳ Initialize with:{RESET} {AQUA}tk init -L{RESET}  {DIM}(or run tk -G r for global review tasks){RESET}");
+        if let Some(ref peer) = store.peer
+            && let Ok(peer_cards) = peer.list_store_cards()
+        {
+            let peer_pending: Vec<_> = peer_cards
+                .iter()
+                .filter(|c| c.meta.status == TaskStatus::PendingClose)
+                .collect();
+            if !peer_pending.is_empty() {
+                println!("  {DIM}↳ Your global vault has {BOLD}{}{RESET}{DIM} tasks awaiting sign-off (run {AQUA}tk -G r{RESET}{DIM}){RESET}", peer_pending.len());
+            }
+        }
+        println!();
+        return Ok(());
+    }
 
     if pending.is_empty() {
         if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {

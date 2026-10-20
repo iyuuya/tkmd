@@ -289,6 +289,7 @@ pub struct TaskStore {
     pub peer: Option<Box<TaskStore>>,
     pub active_scope: ScopeSelection,
     pub uninitialized_git_repo: Option<PathBuf>,
+    pub is_uninitialized_local: bool,
 }
 
 impl TaskStore {
@@ -356,6 +357,7 @@ impl TaskStore {
             peer: None,
             active_scope: ScopeSelection::Global,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         })
     }
 
@@ -414,8 +416,6 @@ impl TaskStore {
         } else {
             root_path.join(&config.daily_dir)
         };
-        fs::create_dir_all(&tasks_path)?;
-
         Ok(Self {
             config,
             tasks_path,
@@ -424,6 +424,7 @@ impl TaskStore {
             peer: None,
             active_scope: ScopeSelection::Local,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         })
     }
 
@@ -440,6 +441,7 @@ impl TaskStore {
                 Ok(store)
             }
             ScopeSelection::Local => {
+                let is_uninit = local_root.is_none();
                 let root = if let Some(r) = local_root {
                     r
                 } else if let Some(gr) = detect_git_root(&cwd) {
@@ -448,7 +450,9 @@ impl TaskStore {
                     cwd.clone()
                 };
                 let mut local = Self::load_local_store(&root)?;
+                local.peer = Some(Box::new(global));
                 local.active_scope = ScopeSelection::Local;
+                local.is_uninitialized_local = is_uninit;
                 Ok(local)
             }
             ScopeSelection::All => {
@@ -1927,6 +1931,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Global,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
         fs::create_dir_all(&store.tasks_path).unwrap();
 
@@ -1988,6 +1993,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Global,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         });
         fs::create_dir_all(&store.tasks_path).unwrap();
 
@@ -2064,6 +2070,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Global,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
         let mut local_store = TaskStore {
             tasks_path: tmp_local.join("tasks"),
@@ -2073,6 +2080,7 @@ mod tests {
             peer: Some(Box::new(global_store)),
             active_scope: ScopeSelection::All,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
 
         // Add task to local store
@@ -2124,6 +2132,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Local,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
 
         // Add task with failing eval command
@@ -2170,6 +2179,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Local,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
 
         // Add task with passing eval command
@@ -2213,6 +2223,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Local,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
 
         store.add_task("p1 Agent work", None, vec![], None, None).unwrap();
@@ -2259,6 +2270,7 @@ mod tests {
             peer: None,
             active_scope: ScopeSelection::Local,
             uninitialized_git_repo: None,
+            is_uninitialized_local: false,
         };
 
         // Add task with DoD checklist
@@ -2286,6 +2298,26 @@ mod tests {
         // Verify lifecycle event was written to .events.jsonl
         let events = store.read_events().unwrap();
         assert!(events.iter().any(|e| e.action == "completed" && e.to_status == "done" && e.actor == "ken"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_uninitialized_local_scope_does_not_create_directory() {
+        let tmp = std::env::temp_dir().join(format!("tkmd-test-uninit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // Simulate loading an uninitialized local store
+        let local_store = TaskStore::load_local_store(&tmp).unwrap();
+        assert_eq!(local_store.is_uninitialized_local, false);
+        // The tasks directory MUST NOT have been created by load_local_store!
+        assert!(!local_store.tasks_path.exists());
+
+        // Listing cards on non-existent directory must return empty Vec cleanly without error
+        let cards = local_store.list_store_cards().unwrap();
+        assert!(cards.is_empty());
+        assert!(!local_store.tasks_path.exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }
