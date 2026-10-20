@@ -546,8 +546,23 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
                 .iter()
                 .filter(|c| c.meta.status != TaskStatus::Done && c.meta.status != TaskStatus::Archived)
                 .collect();
+            let peer_pending: Vec<_> = peer_active
+                .iter()
+                .filter(|c| c.meta.status == TaskStatus::PendingClose)
+                .collect();
             if !peer_active.is_empty() {
-                println!("  {DIM}↳ Your global vault has {BOLD}{}{RESET}{DIM} active tasks (run {AQUA}tk -G{RESET}{DIM} to view){RESET}", peer_active.len());
+                if !peer_pending.is_empty() {
+                    println!(
+                        "  {DIM}↳ Your global vault has {BOLD}{}{RESET}{DIM} active tasks ({BOLD}{}{RESET}{DIM} awaiting review · run {AQUA}tk -G{RESET}{DIM} or {AQUA}tk -G r{RESET}{DIM}){RESET}",
+                        peer_active.len(),
+                        peer_pending.len()
+                    );
+                } else {
+                    println!(
+                        "  {DIM}↳ Your global vault has {BOLD}{}{RESET}{DIM} active tasks (run {AQUA}tk -G{RESET}{DIM} to view){RESET}",
+                        peer_active.len()
+                    );
+                }
             }
         }
         println!();
