@@ -67,7 +67,10 @@ impl Sandbox {
                 self.cmd(&refs).spawn().expect("spawn tk")
             })
             .collect();
-        children.into_iter().map(|c| c.wait_with_output().unwrap()).collect()
+        children
+            .into_iter()
+            .map(|c| c.wait_with_output().unwrap())
+            .collect()
     }
 
     fn cards(&self) -> Vec<(PathBuf, String)> {
@@ -76,7 +79,9 @@ impl Sandbox {
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 p.extension().is_some_and(|x| x == "md")
-                    && p.file_name().and_then(|f| f.to_str()).is_some_and(|f| f.starts_with("tk-"))
+                    && p.file_name()
+                        .and_then(|f| f.to_str())
+                        .is_some_and(|f| f.starts_with("tk-"))
             })
             .map(|p| {
                 let s = std::fs::read_to_string(&p).unwrap();
@@ -112,7 +117,11 @@ impl Drop for Sandbox {
 fn assert_valid_card(s: &str) {
     assert!(s.starts_with("---\n"), "card lost its frontmatter:\n{}", s);
     assert!(Sandbox::field(s, "id").is_some(), "card has no id:\n{}", s);
-    assert!(Sandbox::field(s, "status").is_some(), "card has no status:\n{}", s);
+    assert!(
+        Sandbox::field(s, "status").is_some(),
+        "card has no status:\n{}",
+        s
+    );
 }
 
 /// RED (predicted): `next_id` scans and writes without a store lock, so racing adds reuse ids.
@@ -122,25 +131,55 @@ fn concurrent_adds_get_unique_ids() {
     let n = 16;
     let outs = sb.race(n, |i| vec!["add".into(), format!("p1 parallel task {}", i)]);
     for o in &outs {
-        assert!(o.status.success(), "add failed: {}", String::from_utf8_lossy(&o.stderr));
+        assert!(
+            o.status.success(),
+            "add failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
     }
     let cards = sb.cards();
     assert_eq!(cards.len(), n, "expected {} card files", n);
-    let ids: HashSet<String> = cards.iter().map(|(_, s)| Sandbox::field(s, "id").unwrap()).collect();
-    assert_eq!(ids.len(), n, "duplicate task ids: {:?}", cards.iter().map(|(p, _)| p).collect::<Vec<_>>());
+    let ids: HashSet<String> = cards
+        .iter()
+        .map(|(_, s)| Sandbox::field(s, "id").unwrap())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        n,
+        "duplicate task ids: {:?}",
+        cards.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn concurrent_claims_exactly_one_agent_wins() {
     let sb = Sandbox::new("claims");
     sb.ok(&["add", "p1 contested task"]);
-    let outs = sb.race(16, |i| vec!["c".into(), "1".into(), "-o".into(), format!("agent{}", i)]);
-    let winners: Vec<usize> = outs.iter().enumerate().filter(|(_, o)| o.status.success()).map(|(i, _)| i).collect();
-    assert_eq!(winners.len(), 1, "expected exactly one successful claim, got {:?}", winners);
+    let outs = sb.race(16, |i| {
+        vec!["c".into(), "1".into(), "-o".into(), format!("agent{}", i)]
+    });
+    let winners: Vec<usize> = outs
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.status.success())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "expected exactly one successful claim, got {:?}",
+        winners
+    );
     let card = sb.card("tk-001");
     assert_valid_card(&card);
-    assert_eq!(Sandbox::field(&card, "owner").as_deref(), Some(format!("agent{}", winners[0]).as_str()));
-    assert_eq!(Sandbox::field(&card, "status").as_deref(), Some("in-progress"));
+    assert_eq!(
+        Sandbox::field(&card, "owner").as_deref(),
+        Some(format!("agent{}", winners[0]).as_str())
+    );
+    assert_eq!(
+        Sandbox::field(&card, "status").as_deref(),
+        Some("in-progress")
+    );
 }
 
 #[test]
@@ -157,26 +196,42 @@ fn concurrent_updates_to_different_fields_are_not_lost() {
     let children: Vec<_> = edits.iter().map(|a| sb.cmd(a).spawn().unwrap()).collect();
     for c in children {
         let o = c.wait_with_output().unwrap();
-        assert!(o.status.success(), "set failed: {}", String::from_utf8_lossy(&o.stderr));
+        assert!(
+            o.status.success(),
+            "set failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
     }
     let card = sb.card("tk-001");
     assert_valid_card(&card);
-    assert_eq!(Sandbox::field(&card, "title").as_deref(), Some("renamed card"));
+    assert_eq!(
+        Sandbox::field(&card, "title").as_deref(),
+        Some("renamed card")
+    );
     assert_eq!(Sandbox::field(&card, "priority").as_deref(), Some("P0"));
     assert_eq!(Sandbox::field(&card, "due").as_deref(), Some("2026-12-01"));
     assert_eq!(Sandbox::field(&card, "eval").as_deref(), Some("true"));
-    assert!(card.contains("- first") && card.contains("- second"), "dod lost:\n{}", card);
+    assert!(
+        card.contains("- first") && card.contains("- second"),
+        "dod lost:\n{}",
+        card
+    );
 }
 
 #[test]
 fn concurrent_submits_leave_a_valid_card_and_event_log() {
     let sb = Sandbox::new("submits");
     sb.ok(&["add", "p1 reviewed card"]);
-    let outs = sb.race(12, |i| vec!["r".into(), "1".into(), "-a".into(), format!("agent{}", i)]);
+    let outs = sb.race(12, |i| {
+        vec!["r".into(), "1".into(), "-a".into(), format!("agent{}", i)]
+    });
     assert!(outs.iter().all(|o| o.status.success()));
     let card = sb.card("tk-001");
     assert_valid_card(&card);
-    assert_eq!(Sandbox::field(&card, "status").as_deref(), Some("pending-close"));
+    assert_eq!(
+        Sandbox::field(&card, "status").as_deref(),
+        Some("pending-close")
+    );
     let events = std::fs::read_to_string(sb.vault().join(".events.jsonl")).unwrap();
     let mut n = 0;
     for line in events.lines() {
@@ -184,7 +239,11 @@ fn concurrent_submits_leave_a_valid_card_and_event_log() {
             .unwrap_or_else(|e| panic!("corrupt event line {:?}: {}", line, e));
         n += 1;
     }
-    assert!(n >= 13, "expected the add plus 12 submits, got {} events", n);
+    assert!(
+        n >= 13,
+        "expected the add plus 12 submits, got {} events",
+        n
+    );
 }
 
 #[test]
@@ -192,11 +251,22 @@ fn agents_cannot_close_work_from_the_cli() {
     let sb = Sandbox::new("noclose");
     sb.ok(&["add", "p1 agent work"]);
     sb.ok(&["r", "1", "-a", "claude"]);
-    for args in [vec!["d", "1"], vec!["d", "1", "-a", "tester"], vec!["d", "--pending"]] {
+    for args in [
+        vec!["d", "1"],
+        vec!["d", "1", "-a", "tester"],
+        vec!["d", "--pending"],
+    ] {
         let o = sb.tk(&args);
-        assert!(!o.status.success(), "tk {:?} should not close from a non-terminal", args);
+        assert!(
+            !o.status.success(),
+            "tk {:?} should not close from a non-terminal",
+            args
+        );
     }
-    assert_eq!(Sandbox::field(&sb.card("tk-001"), "status").as_deref(), Some("pending-close"));
+    assert_eq!(
+        Sandbox::field(&sb.card("tk-001"), "status").as_deref(),
+        Some("pending-close")
+    );
 }
 
 /// RED (predicted): evals have no timeout, and now run under the card lock, so one hung eval
@@ -209,7 +279,11 @@ fn hung_eval_times_out_and_releases_the_lock() {
     // Configure a short timeout through the generated config.
     let cfg = sb.root.join("home/.config/tkmd/config.toml");
     let text = std::fs::read_to_string(&cfg).unwrap();
-    assert!(text.contains("eval_timeout_secs = 600"), "default timeout should be written:\n{}", text);
+    assert!(
+        text.contains("eval_timeout_secs = 600"),
+        "default timeout should be written:\n{}",
+        text
+    );
     let text = text.replace("eval_timeout_secs = 600", "eval_timeout_secs = 2");
     std::fs::write(&cfg, text).unwrap();
 
@@ -220,14 +294,22 @@ fn hung_eval_times_out_and_releases_the_lock() {
     let slow_out = slow.wait_with_output().unwrap();
     let elapsed = start.elapsed();
 
-    assert!(elapsed < Duration::from_secs(10), "eval did not time out ({:?})", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "eval did not time out ({:?})",
+        elapsed
+    );
     assert!(!slow_out.status.success(), "timed-out eval must fail");
     assert!(
         String::from_utf8_lossy(&slow_out.stdout).contains("timed out")
             || String::from_utf8_lossy(&slow_out.stderr).contains("timed out"),
         "timeout should be reported"
     );
-    assert!(other.status.success(), "lock was not released: {}", String::from_utf8_lossy(&other.stderr));
+    assert!(
+        other.status.success(),
+        "lock was not released: {}",
+        String::from_utf8_lossy(&other.stderr)
+    );
 }
 
 /// Mixed workload: agents add, claim, update and submit at once. Every card must stay valid.
@@ -239,9 +321,24 @@ fn mixed_agent_workload_keeps_every_card_valid() {
     }
     let outs = sb.race(32, |i| match i % 4 {
         0 => vec!["add".into(), format!("p2 extra {}", i)],
-        1 => vec!["c".into(), format!("{}", i % 8 + 1), "-o".into(), format!("agent{}", i)],
-        2 => vec!["set".into(), format!("{}", i % 8 + 1), "--due".into(), "2026-12-24".into()],
-        _ => vec!["r".into(), format!("{}", i % 8 + 1), "-a".into(), format!("agent{}", i)],
+        1 => vec![
+            "c".into(),
+            format!("{}", i % 8 + 1),
+            "-o".into(),
+            format!("agent{}", i),
+        ],
+        2 => vec![
+            "set".into(),
+            format!("{}", i % 8 + 1),
+            "--due".into(),
+            "2026-12-24".into(),
+        ],
+        _ => vec![
+            "r".into(),
+            format!("{}", i % 8 + 1),
+            "-a".into(),
+            format!("agent{}", i),
+        ],
     });
     // Refused claims are fine; crashes and corrupt cards are not.
     for o in &outs {
@@ -250,7 +347,10 @@ fn mixed_agent_workload_keeps_every_card_valid() {
         assert!(!err.contains("Invalid YAML"), "corrupt card: {}", err);
     }
     let cards = sb.cards();
-    let ids: HashSet<String> = cards.iter().map(|(_, s)| Sandbox::field(s, "id").unwrap()).collect();
+    let ids: HashSet<String> = cards
+        .iter()
+        .map(|(_, s)| Sandbox::field(s, "id").unwrap())
+        .collect();
     assert_eq!(ids.len(), cards.len(), "duplicate ids after mixed workload");
     for (_, s) in &cards {
         assert_valid_card(s);
@@ -266,8 +366,14 @@ fn invalid_config_is_reported_not_ignored() {
     let cfg = sb.root.join("home/.config/tkmd/config.toml");
     std::fs::write(&cfg, "mode = \"cli\"\n[policy\nrequire_eval = true\n").unwrap();
     let o = sb.tk(&["ls"]);
-    assert!(!o.status.success(), "tk should refuse to run with a broken config");
-    assert!(String::from_utf8_lossy(&o.stderr).contains("config"), "error should name the config file");
+    assert!(
+        !o.status.success(),
+        "tk should refuse to run with a broken config"
+    );
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("config"),
+        "error should name the config file"
+    );
 }
 
 #[test]
@@ -276,7 +382,10 @@ fn agents_cannot_turn_on_auto_accept() {
     sb.ok(&["add", "p1 checked work"]);
     sb.ok(&["set", "1", "--eval", "true"]);
     let o = sb.tk(&["auto", "1"]);
-    assert!(!o.status.success(), "a non-terminal caller must not approve an eval");
+    assert!(
+        !o.status.success(),
+        "a non-terminal caller must not approve an eval"
+    );
     assert!(Sandbox::field(&sb.card("tk-001"), "approved_eval").is_none());
     // Revoking is always allowed.
     sb.ok(&["auto", "1", "--off"]);
@@ -293,7 +402,12 @@ fn piped_output_has_no_color_codes() {
         c.env_remove("NO_COLOR");
         let out = c.output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(!text.contains('\x1b'), "tk {:?} wrote ANSI codes to a pipe:\n{}", args, text);
+        assert!(
+            !text.contains('\x1b'),
+            "tk {:?} wrote ANSI codes to a pipe:\n{}",
+            args,
+            text
+        );
     }
 }
 
@@ -301,11 +415,19 @@ fn piped_output_has_no_color_codes() {
 fn unreadable_card_is_reported_not_hidden() {
     let sb = Sandbox::new("corrupt");
     sb.ok(&["add", "p1 good card"]);
-    std::fs::write(sb.vault().join("tk-002-broken.md"), "---\nid: tk-002\nstatus: [broken\n---\nbody\n").unwrap();
+    std::fs::write(
+        sb.vault().join("tk-002-broken.md"),
+        "---\nid: tk-002\nstatus: [broken\n---\nbody\n",
+    )
+    .unwrap();
     let o = sb.tk(&["ls"]);
     assert!(o.status.success(), "one bad card must not break listing");
     let err = String::from_utf8_lossy(&o.stderr);
-    assert!(err.contains("tk-002-broken.md"), "bad card should be named on stderr, got: {}", err);
+    assert!(
+        err.contains("tk-002-broken.md"),
+        "bad card should be named on stderr, got: {}",
+        err
+    );
 }
 
 #[test]

@@ -239,7 +239,6 @@ pub enum CardScope {
     Global,
 }
 
-
 impl std::fmt::Display for CardScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

@@ -21,7 +21,12 @@ fn run(root: &Path, args: &[&str]) -> Duration {
         .output()
         .unwrap();
     let took = start.elapsed();
-    assert!(out.status.success(), "tk {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "tk {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
     took
 }
 
@@ -39,7 +44,11 @@ fn scale_commands_on_3000_cards() {
     let template_path = std::fs::read_dir(&vault)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .find(|p| p.file_name().and_then(|f| f.to_str()).is_some_and(|f| f.starts_with("tk-001")))
+        .find(|p| {
+            p.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.starts_with("tk-001"))
+        })
         .unwrap();
     let template = std::fs::read_to_string(&template_path).unwrap();
     for i in 2..=n {
@@ -59,7 +68,10 @@ fn scale_commands_on_3000_cards() {
         ("add", vec!["add", "p1 one more"]),
         ("claim last", vec!["c", last.as_str(), "-o", "agent"]),
         ("review last", vec!["r", last.as_str(), "-a", "agent"]),
-        ("dep last needs 1", vec!["dep", last.as_str(), "--needs", "1"]),
+        (
+            "dep last needs 1",
+            vec!["dep", last.as_str(), "--needs", "1"],
+        ),
     ] {
         let t = run(&root, &args);
         report.push((label, t));
@@ -69,6 +81,12 @@ fn scale_commands_on_3000_cards() {
     }
     let _ = std::fs::remove_dir_all(&root);
     for (label, t) in report {
-        assert!(t < Duration::from_secs(3), "`{}` took {:?} on {} cards", label, t, n);
+        assert!(
+            t < Duration::from_secs(3),
+            "`{}` took {:?} on {} cards",
+            label,
+            t,
+            n
+        );
     }
 }

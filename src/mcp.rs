@@ -170,7 +170,10 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
             }),
             "tools/call" => {
                 let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let args = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 let tool_res = handle_tool_call(store, tool_name, &args);
                 match tool_res {
                     Ok(text) => json!({
@@ -199,7 +202,12 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
 
         let out_str = serde_json::to_string(&response)?;
         if use_content_length {
-            write!(stdout, "Content-Length: {}\r\n\r\n{}", out_str.len(), out_str)?;
+            write!(
+                stdout,
+                "Content-Length: {}\r\n\r\n{}",
+                out_str.len(),
+                out_str
+            )?;
         } else {
             writeln!(stdout, "{}", out_str)?;
         }
@@ -219,7 +227,8 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
             let filtered: Vec<_> = cards
                 .into_iter()
                 .filter(|c| {
-                    let owner_ok = owner_filter.is_none_or(|o| c.meta.owner.eq_ignore_ascii_case(o));
+                    let owner_ok =
+                        owner_filter.is_none_or(|o| c.meta.owner.eq_ignore_ascii_case(o));
                     let status_ok = status_filter
                         .is_none_or(|s| c.meta.status.as_str().eq_ignore_ascii_case(s));
                     let scope_ok = scope_filter.is_none_or(|s| match s.to_lowercase().as_str() {
@@ -233,10 +242,7 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
             Ok(serde_json::to_string_pretty(&filtered)?)
         }
         "task_add" => {
-            let shorthand = args
-                .get("shorthand")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let shorthand = args.get("shorthand").and_then(|v| v.as_str()).unwrap_or("");
             let details = args.get("details").and_then(|v| v.as_str());
             let dod = args
                 .get("dod")
@@ -327,7 +333,8 @@ mod tests {
     use std::fs;
 
     fn setup_test_store(name: &str) -> (TaskStore, std::path::PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("tkmd-mcp-test-{}-{}", name, std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("tkmd-mcp-test-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("tasks")).unwrap();
 
@@ -380,7 +387,8 @@ mod tests {
             "owner": "claude",
             "session_id": "claude -r 999"
         });
-        let claim_res = handle_tool_call(&store, "task_claim", &claim_args).expect("task_claim failed");
+        let claim_res =
+            handle_tool_call(&store, "task_claim", &claim_args).expect("task_claim failed");
         let claimed: Value = serde_json::from_str(&claim_res).unwrap();
         assert_eq!(claimed["status"], "in-progress");
         assert_eq!(claimed["owner"], "claude");
@@ -400,7 +408,8 @@ mod tests {
             "actor": "claude",
             "note": "All checks verified"
         });
-        let rev_res = handle_tool_call(&store, "task_submit_review", &rev_args).expect("task_submit_review failed");
+        let rev_res = handle_tool_call(&store, "task_submit_review", &rev_args)
+            .expect("task_submit_review failed");
         let reviewed: Value = serde_json::from_str(&rev_res).unwrap();
         assert_eq!(reviewed["status"], "pending-close");
 
@@ -412,7 +421,10 @@ mod tests {
         });
         let comp_err = handle_tool_call(&store, "task_complete", &comp_args).unwrap_err();
         assert!(comp_err.to_string().contains("awaiting human sign-off"));
-        assert_eq!(store.find_task("1").unwrap().meta.status, crate::model::TaskStatus::PendingClose);
+        assert_eq!(
+            store.find_task("1").unwrap().meta.status,
+            crate::model::TaskStatus::PendingClose
+        );
 
         // 6. CPM calculation via MCP
         let cpm_res = handle_tool_call(&store, "task_cpm", &json!({})).expect("task_cpm failed");

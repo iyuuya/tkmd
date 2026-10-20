@@ -119,9 +119,10 @@ pub fn detect_local_store(cwd: &Path, global_vault_path: &Path) -> Option<PathBu
     loop {
         if let Some(ref g) = global_canon {
             if let Ok(c) = cur.canonicalize()
-                && c == *g {
-                    return None;
-                }
+                && c == *g
+            {
+                return None;
+            }
         } else if cur == global_vault_path {
             return None;
         }
@@ -202,7 +203,9 @@ fn command_exists(bin: &str) -> bool {
 
 /// Auto-detect all installed editors on `$PATH` (Helix, Neovim, Zed, VS Code, Cursor, Vim, Micro, Nano).
 pub fn detect_installed_editors() -> Vec<String> {
-    let candidates = ["hx", "nvim", "zed", "code", "cursor", "vim", "micro", "nano"];
+    let candidates = [
+        "hx", "nvim", "zed", "code", "cursor", "vim", "micro", "nano",
+    ];
     candidates
         .iter()
         .filter(|b| command_exists(b))
@@ -296,11 +299,12 @@ impl Default for AppConfig {
                 .file_name()
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string());
-            let base_file = if vault.join("bases").is_dir() || vault.join("bases/tasks.base").exists() {
-                "bases/tasks.base".to_string()
-            } else {
-                "tasks.base".to_string()
-            };
+            let base_file =
+                if vault.join("bases").is_dir() || vault.join("bases/tasks.base").exists() {
+                    "bases/tasks.base".to_string()
+                } else {
+                    "tasks.base".to_string()
+                };
             Self {
                 mode: "obsidian".to_string(),
                 vault_path: vault.to_string_lossy().to_string(),
@@ -372,7 +376,8 @@ impl TaskStore {
         let mut config = config;
         set_human_owner(&config.default_owner);
         // Check for runtime environment variable override (TASKMD_DIR or TASKMD_PATH)
-        if let Ok(env_path) = std::env::var("TASKMD_DIR").or_else(|_| std::env::var("TASKMD_PATH")) {
+        if let Ok(env_path) = std::env::var("TASKMD_DIR").or_else(|_| std::env::var("TASKMD_PATH"))
+        {
             config.vault_path = env_path;
             config.tasks_dir = String::new();
         }
@@ -772,11 +777,12 @@ views:
     pub fn list_all(&self) -> Result<Vec<TaskCard>> {
         let mut cards = self.list_store_cards()?;
         if self.active_scope == ScopeSelection::All
-            && let Some(ref peer) = self.peer {
-                let mut peer_cards = peer.list_store_cards()?;
-                cards.append(&mut peer_cards);
-                cards.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
-            }
+            && let Some(ref peer) = self.peer
+        {
+            let mut peer_cards = peer.list_store_cards()?;
+            cards.append(&mut peer_cards);
+            cards.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
+        }
         Ok(cards)
     }
 
@@ -790,7 +796,9 @@ views:
             .context("Unclosed YAML frontmatter")?
             + 4;
         let yaml_str = &raw[4..end_idx];
-        let body = raw[end_idx + 4..].trim_start_matches(['\r', '\n']).to_string();
+        let body = raw[end_idx + 4..]
+            .trim_start_matches(['\r', '\n'])
+            .to_string();
 
         let meta: TaskFrontmatter = serde_yaml::from_str(yaml_str)
             .with_context(|| format!("Invalid YAML in {:?}", path))?;
@@ -870,11 +878,16 @@ views:
             if clean_sid.is_some() || *existing == prefix_latest {
                 *existing = entry_str;
             }
-        } else if (!card.meta.sessions.iter().any(|e| e.starts_with(&agent_prefix))
+        } else if (!card
+            .meta
+            .sessions
+            .iter()
+            .any(|e| e.starts_with(&agent_prefix))
             || clean_sid.is_some())
-            && !card.meta.sessions.contains(&entry_str) {
-                card.meta.sessions.push(entry_str);
-            }
+            && !card.meta.sessions.contains(&entry_str)
+        {
+            card.meta.sessions.push(entry_str);
+        }
     }
 
     /// Synchronize `meta.sessions` and the `## Agent Sessions` Markdown section inside `card.body`
@@ -884,10 +897,11 @@ views:
         let owner_copy = card.meta.owner.clone();
         let sid_copy = card.meta.session_id.clone();
         let sid_already_assigned = sid_copy.as_deref().is_some_and(|s| {
-            card.meta
-                .sessions
-                .iter()
-                .any(|entry| entry.split_once(':').is_some_and(|(_, es)| es.trim() == s.trim()))
+            card.meta.sessions.iter().any(|entry| {
+                entry
+                    .split_once(':')
+                    .is_some_and(|(_, es)| es.trim() == s.trim())
+            })
         });
         if !sid_already_assigned {
             Self::record_session_on_card(card, &owner_copy, sid_copy.as_deref());
@@ -1066,9 +1080,10 @@ views:
 
         let mut sections = format!("# {}\n", meta.title);
         if let Some(d) = details
-            && !d.trim().is_empty() {
-                sections.push_str(&format!("\n{}\n", d.trim()));
-            }
+            && !d.trim().is_empty()
+        {
+            sections.push_str(&format!("\n{}\n", d.trim()));
+        }
         if !dod.is_empty() {
             sections.push_str("\n## Definition of Done (DoD)\n");
             for item in &dod {
@@ -1118,7 +1133,10 @@ views:
 
         let cards = self.list_store_cards()?;
         if let Some(id) = &id_query {
-            if let Some(card) = cards.into_iter().find(|c| c.meta.id.eq_ignore_ascii_case(id)) {
+            if let Some(card) = cards
+                .into_iter()
+                .find(|c| c.meta.id.eq_ignore_ascii_case(id))
+            {
                 return Ok(card);
             }
         } else if !q.is_empty() {
@@ -1198,11 +1216,18 @@ views:
 
         let open = self.open_blockers(&card)?;
         if !open.is_empty() {
-            bail!("Cannot claim {} — Blocked by open task(s): {}", card.meta.id, open.join(", "));
+            bail!(
+                "Cannot claim {} — Blocked by open task(s): {}",
+                card.meta.id,
+                open.join(", ")
+            );
         }
 
         let takeover = if force && !card.meta.owner.eq_ignore_ascii_case(&new_owner) {
-            format!(" (forced takeover from `{}`, was `{}`)", card.meta.owner, prev)
+            format!(
+                " (forced takeover from `{}`, was `{}`)",
+                card.meta.owner, prev
+            )
         } else {
             String::new()
         };
@@ -1234,7 +1259,11 @@ views:
         self.write_card(&card)?;
         self.log_event(
             &card.meta.id,
-            if takeover.is_empty() { "claimed" } else { "claimed-forced" },
+            if takeover.is_empty() {
+                "claimed"
+            } else {
+                "claimed-forced"
+            },
             owner,
             card.meta.session_id.as_deref(),
             Some(&prev),
@@ -1258,7 +1287,9 @@ views:
             .filter(|bid| {
                 all.iter()
                     .find(|c| c.meta.id.eq_ignore_ascii_case(bid))
-                    .is_some_and(|t| !matches!(t.meta.status, TaskStatus::Done | TaskStatus::Archived))
+                    .is_some_and(|t| {
+                        !matches!(t.meta.status, TaskStatus::Done | TaskStatus::Archived)
+                    })
             })
             .cloned()
             .collect())
@@ -1338,7 +1369,13 @@ views:
                 actor,
                 secs
             );
-            return Ok((false, format!("eval timed out after {}s ([policy].eval_timeout_secs)", secs)));
+            return Ok((
+                false,
+                format!(
+                    "eval timed out after {}s ([policy].eval_timeout_secs)",
+                    secs
+                ),
+            ));
         };
 
         let passed = output.status.success();
@@ -1388,14 +1425,24 @@ views:
         card.scope = found.scope;
 
         if matches!(card.meta.status, TaskStatus::Done | TaskStatus::Archived) {
-            bail!("Cannot submit {}: it is already `{}`", card.meta.id, card.meta.status.as_str());
+            bail!(
+                "Cannot submit {}: it is already `{}`",
+                card.meta.id,
+                card.meta.status.as_str()
+            );
         }
         let open = self.open_blockers(&card)?;
         if !open.is_empty() {
-            bail!("Cannot submit {}: still blocked by open task(s): {}", card.meta.id, open.join(", "));
+            bail!(
+                "Cannot submit {}: still blocked by open task(s): {}",
+                card.meta.id,
+                open.join(", ")
+            );
         }
         let submitter = actor.trim().trim_start_matches('@').to_lowercase();
-        if card.meta.status == TaskStatus::InProgress && !card.meta.owner.eq_ignore_ascii_case(&submitter) {
+        if card.meta.status == TaskStatus::InProgress
+            && !card.meta.owner.eq_ignore_ascii_case(&submitter)
+        {
             bail!(
                 "Cannot submit {}: `{}` claimed it. Only the owner submits; take it over with `tk c {} --force`",
                 card.meta.id,
@@ -1440,7 +1487,12 @@ views:
         card.meta.receipt = Some(ReviewReceipt {
             snapshot: self.worktree_snapshot(),
             eval: card.meta.eval.clone(),
-            eval_result: if card.meta.eval.is_some() { "passed" } else { "no-eval" }.to_string(),
+            eval_result: if card.meta.eval.is_some() {
+                "passed"
+            } else {
+                "no-eval"
+            }
+            .to_string(),
             submitted_by: actor.to_string(),
             submitted_at: Local::now().to_rfc3339(),
         });
@@ -1515,14 +1567,20 @@ views:
     /// check passes, the task closes without a manual sign-off. Human-only (`Interactive`).
     pub fn approve_eval(&self, query: &str, approval: Approval) -> Result<TaskCard> {
         if approval == Approval::Untrusted {
-            bail!("Only a person at an interactive terminal can approve an eval for auto-accept (`tk auto`)");
+            bail!(
+                "Only a person at an interactive terminal can approve an eval for auto-accept (`tk auto`)"
+            );
         }
         let found = self.find_task(query)?;
         let _lock = Self::lock_card(Path::new(&found.path))?;
         let mut card = Self::read_card(Path::new(&found.path))?;
         card.scope = found.scope;
         if matches!(card.meta.status, TaskStatus::Done | TaskStatus::Archived) {
-            bail!("{} is already `{}`", card.meta.id, card.meta.status.as_str());
+            bail!(
+                "{} is already `{}`",
+                card.meta.id,
+                card.meta.status.as_str()
+            );
         }
         let Some(eval) = card.meta.eval.clone() else {
             bail!(
@@ -1542,7 +1600,16 @@ views:
         );
         self.write_card(&card)?;
         let st = card.meta.status.as_str().to_string();
-        self.log_event(&card.meta.id, "eval-approved", &self.config.default_owner, None, Some(&st), &st, None, &card.meta.title)?;
+        self.log_event(
+            &card.meta.id,
+            "eval-approved",
+            &self.config.default_owner,
+            None,
+            Some(&st),
+            &st,
+            None,
+            &card.meta.title,
+        )?;
         Ok(card)
     }
 
@@ -1560,7 +1627,16 @@ views:
             );
             self.write_card(&card)?;
             let st = card.meta.status.as_str().to_string();
-            self.log_event(&card.meta.id, "eval-approval-revoked", "system", None, Some(&st), &st, None, &card.meta.title)?;
+            self.log_event(
+                &card.meta.id,
+                "eval-approval-revoked",
+                "system",
+                None,
+                Some(&st),
+                &st,
+                None,
+                &card.meta.title,
+            )?;
         }
         Ok(card)
     }
@@ -1711,7 +1787,12 @@ views:
             .filter(|id| !id.eq_ignore_ascii_case(completed_id))
             .collect();
         for other in all {
-            if !other.meta.blocked_by.iter().any(|b| b.eq_ignore_ascii_case(completed_id)) {
+            if !other
+                .meta
+                .blocked_by
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(completed_id))
+            {
                 continue;
             }
             let _lock = Self::lock_card(Path::new(&other.path))?;
@@ -1777,7 +1858,8 @@ views:
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let index = std::env::temp_dir().join(format!("tkmd-index-{}-{}", std::process::id(), nanos));
+        let index =
+            std::env::temp_dir().join(format!("tkmd-index-{}-{}", std::process::id(), nanos));
         let mut add_args = vec!["add", "-A", "--"];
         add_args.extend(pathspecs.iter().map(String::as_str));
         let tree = git_output(&top, &add_args, Some(index.as_path()))
@@ -1842,13 +1924,21 @@ views:
 
         if !new_dod.is_empty() {
             card.meta.dod = new_dod.clone();
-            let dod_lines: Vec<String> = new_dod.iter().map(|item| format!("- [ ] {}", item)).collect();
+            let dod_lines: Vec<String> = new_dod
+                .iter()
+                .map(|item| format!("- [ ] {}", item))
+                .collect();
             let new_dod_block = format!("## Definition of Done (DoD)\n{}", dod_lines.join("\n"));
             if let Some(dod_idx) = card.body.find("## Definition of Done (DoD)") {
                 let after = &card.body[dod_idx + "## Definition of Done (DoD)".len()..];
                 if let Some(next_h2) = after.find("\n## ") {
                     let end_idx = dod_idx + "## Definition of Done (DoD)".len() + next_h2;
-                    card.body = format!("{}{}\n{}", &card.body[..dod_idx], new_dod_block, &card.body[end_idx..]);
+                    card.body = format!(
+                        "{}{}\n{}",
+                        &card.body[..dod_idx],
+                        new_dod_block,
+                        &card.body[end_idx..]
+                    );
                 } else {
                     card.body = format!("{}{}\n", &card.body[..dod_idx], new_dod_block);
                 }
@@ -1866,7 +1956,12 @@ views:
                 let after = &card.body[eval_idx + "## Automated Eval".len()..];
                 if let Some(next_h2) = after.find("\n## ") {
                     let end_idx = eval_idx + "## Automated Eval".len() + next_h2;
-                    card.body = format!("{}{}\n{}", &card.body[..eval_idx], eval_block, &card.body[end_idx..]);
+                    card.body = format!(
+                        "{}{}\n{}",
+                        &card.body[..eval_idx],
+                        eval_block,
+                        &card.body[end_idx..]
+                    );
                 } else {
                     card.body = format!("{}{}\n", &card.body[..eval_idx], eval_block);
                 }
@@ -1882,17 +1977,25 @@ views:
             if card.meta.status == TaskStatus::PendingClose {
                 card.meta.status = TaskStatus::InProgress;
                 card.meta.receipt = None;
-                changes.push("status -> in-progress (review invalidated by eval change)".to_string());
+                changes
+                    .push("status -> in-progress (review invalidated by eval change)".to_string());
             }
         }
 
         if changes.is_empty() {
-            bail!("No updates specified. Use --title, --priority, --owner, --due, --dod, or --eval");
+            bail!(
+                "No updates specified. Use --title, --priority, --owner, --due, --dod, or --eval"
+            );
         }
 
         card.meta.updated = today;
         let change_summary = changes.join(", ");
-        card.body = format!("{}\n- `{}`: Updated properties: {}.", card.body.trim_end(), now_ts, change_summary);
+        card.body = format!(
+            "{}\n- `{}`: Updated properties: {}.",
+            card.body.trim_end(),
+            now_ts,
+            change_summary
+        );
 
         self.write_card(&card)?;
         Ok(card)
@@ -1917,11 +2020,19 @@ views:
         let graph: std::collections::HashMap<String, Vec<String>> = self
             .list_all()?
             .into_iter()
-            .map(|c| (c.meta.id.to_lowercase(), c.meta.blocked_by.iter().map(|b| b.to_lowercase()).collect()))
+            .map(|c| {
+                (
+                    c.meta.id.to_lowercase(),
+                    c.meta.blocked_by.iter().map(|b| b.to_lowercase()).collect(),
+                )
+            })
             .collect();
         let target = found.meta.id.to_lowercase();
         for blocker in &blockers {
-            let mut stack = vec![(blocker.meta.id.to_lowercase(), vec![blocker.meta.id.clone()])];
+            let mut stack = vec![(
+                blocker.meta.id.to_lowercase(),
+                vec![blocker.meta.id.clone()],
+            )];
             let mut seen = std::collections::HashSet::new();
             while let Some((node, path)) = stack.pop() {
                 if node == target {
@@ -1949,7 +2060,12 @@ views:
             let _lock = Self::lock_card(Path::new(&blocker.path))?;
             let mut blocker_card = Self::read_card(Path::new(&blocker.path))?;
             blocker_card.scope = blocker.scope;
-            if !blocker_card.meta.blocks.iter().any(|b| b.eq_ignore_ascii_case(&found.meta.id)) {
+            if !blocker_card
+                .meta
+                .blocks
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(&found.meta.id))
+            {
                 blocker_card.meta.blocks.push(found.meta.id.clone());
                 self.write_card(&blocker_card)?;
             }
@@ -1960,7 +2076,12 @@ views:
         dep_card.scope = found.scope;
         let mut added = Vec::new();
         for blocker in &blockers {
-            if !dep_card.meta.blocked_by.iter().any(|b| b.eq_ignore_ascii_case(&blocker.meta.id)) {
+            if !dep_card
+                .meta
+                .blocked_by
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(&blocker.meta.id))
+            {
                 dep_card.meta.blocked_by.push(blocker.meta.id.clone());
                 added.push(blocker.meta.id.clone());
             }
@@ -2015,10 +2136,12 @@ views:
     }
 
     fn log_to_daily_note(&self, card: &TaskCard, note: Option<&str>) -> Result<()> {
-        if card.scope == CardScope::Global && self.scope != CardScope::Global
-            && let Some(ref peer) = self.peer {
-                return peer.log_to_daily_note(card, note);
-            }
+        if card.scope == CardScope::Global
+            && self.scope != CardScope::Global
+            && let Some(ref peer) = self.peer
+        {
+            return peer.log_to_daily_note(card, note);
+        }
         if self.config.mode == "cli" || self.config.daily_dir.trim().is_empty() {
             return Ok(());
         }
@@ -2109,11 +2232,12 @@ views:
     pub fn read_events(&self) -> Result<Vec<TaskEvent>> {
         let mut events = Self::read_events_from_path(&self.tasks_path)?;
         if self.active_scope == ScopeSelection::All
-            && let Some(ref peer) = self.peer {
-                let mut peer_events = Self::read_events_from_path(&peer.tasks_path)?;
-                events.append(&mut peer_events);
-                events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-            }
+            && let Some(ref peer) = self.peer
+        {
+            let mut peer_events = Self::read_events_from_path(&peer.tasks_path)?;
+            events.append(&mut peer_events);
+            events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        }
         Ok(events)
     }
 
@@ -2146,21 +2270,19 @@ views:
                     c.meta.project.as_deref().unwrap_or(""),
                     c.meta.tags.join(" ")
                 );
-                let score = fuzzy_score(&header, q)
-                    .map(|s| s * 2 + 50)
-                    .or_else(|| {
-                        // In full markdown body, require exact substring match for each token
-                        let body_lower = searchable.to_lowercase();
-                        let mut body_score = 0i64;
-                        for tok in q.split_whitespace() {
-                            let pat = tok.to_lowercase();
-                            {
-                                let pos = body_lower.find(&pat)?;
-                                body_score += 100 - (pos.min(80) as i64);
-                            }
+                let score = fuzzy_score(&header, q).map(|s| s * 2 + 50).or_else(|| {
+                    // In full markdown body, require exact substring match for each token
+                    let body_lower = searchable.to_lowercase();
+                    let mut body_score = 0i64;
+                    for tok in q.split_whitespace() {
+                        let pat = tok.to_lowercase();
+                        {
+                            let pos = body_lower.find(&pat)?;
+                            body_score += 100 - (pos.min(80) as i64);
                         }
-                        Some(body_score)
-                    })?;
+                    }
+                    Some(body_score)
+                })?;
                 Some((score, c))
             })
             .collect();
@@ -2182,9 +2304,10 @@ views:
                 continue;
             }
             if let Some(fid) = id_filter
-                && !card.meta.id.eq_ignore_ascii_case(fid) {
-                    continue;
-                }
+                && !card.meta.id.eq_ignore_ascii_case(fid)
+            {
+                continue;
+            }
 
             let old_path = PathBuf::from(&card.path);
             let filename = old_path.file_name().context("Invalid card filename")?;
@@ -2221,9 +2344,10 @@ views:
                 continue;
             }
             if let Some(fid) = id_filter
-                && !card.meta.id.eq_ignore_ascii_case(fid) {
-                    continue;
-                }
+                && !card.meta.id.eq_ignore_ascii_case(fid)
+            {
+                continue;
+            }
 
             let path = PathBuf::from(&card.path);
             if path.exists() {
@@ -2320,7 +2444,12 @@ pub fn slugify(title: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('-').to_string();
-    trimmed.chars().take(45).collect::<String>().trim_end_matches('-').to_string()
+    trimmed
+        .chars()
+        .take(45)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_string()
 }
 
 /// Report an unreadable card once per process on stderr (never stdout, which MCP uses).
@@ -2328,7 +2457,11 @@ fn warn_unreadable_card(path: &Path, err: &anyhow::Error) {
     use std::sync::{Mutex, OnceLock};
     static SEEN: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
     let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
-    if seen.lock().map(|mut s| s.insert(path.to_path_buf())).unwrap_or(false) {
+    if seen
+        .lock()
+        .map(|mut s| s.insert(path.to_path_buf()))
+        .unwrap_or(false)
+    {
         let name = path.file_name().and_then(|f| f.to_str()).unwrap_or("?");
         eprintln!("warning: skipped unreadable card {}: {:#}", name, err);
     }
@@ -2348,7 +2481,9 @@ fn run_with_timeout(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
@@ -2380,7 +2515,11 @@ fn run_with_timeout(
     };
     let stdout = out_t.join().unwrap_or_default();
     let stderr = err_t.join().unwrap_or_default();
-    Ok(status.map(|status| std::process::Output { status, stdout, stderr }))
+    Ok(status.map(|status| std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }))
 }
 
 #[cfg(unix)]
@@ -2519,15 +2658,7 @@ mod tests {
             let card_id = card.meta.id.clone();
             let handle = std::thread::spawn(move || {
                 let owner = format!("agent_{}", i);
-                let _ = s.update_task(
-                    &card_id,
-                    None,
-                    None,
-                    Some(owner),
-                    None,
-                    vec![],
-                    None,
-                );
+                let _ = s.update_task(&card_id, None, None, Some(owner), None, vec![], None);
             });
             handles.push(handle);
         }
@@ -2598,18 +2729,31 @@ mod tests {
         };
 
         // Add task to local store
-        let c_loc = local_store.add_task("p1 Local repo task", None, vec![], None, None).unwrap();
+        let c_loc = local_store
+            .add_task("p1 Local repo task", None, vec![], None, None)
+            .unwrap();
         assert_eq!(c_loc.scope, CardScope::Local);
 
         // Add task to peer global store
-        let c_glob = local_store.peer.as_ref().unwrap().add_task("p0 Global vault task", None, vec![], None, None).unwrap();
+        let c_glob = local_store
+            .peer
+            .as_ref()
+            .unwrap()
+            .add_task("p0 Global vault task", None, vec![], None, None)
+            .unwrap();
         assert_eq!(c_glob.scope, CardScope::Global);
 
         // When listing with ScopeSelection::All, should return both!
         let all = local_store.list_all().unwrap();
         assert_eq!(all.len(), 2);
-        assert!(all.iter().any(|c| c.scope == CardScope::Local && c.meta.title == "Local repo task"));
-        assert!(all.iter().any(|c| c.scope == CardScope::Global && c.meta.title == "Global vault task"));
+        assert!(
+            all.iter()
+                .any(|c| c.scope == CardScope::Local && c.meta.title == "Local repo task")
+        );
+        assert!(
+            all.iter()
+                .any(|c| c.scope == CardScope::Global && c.meta.title == "Global vault task")
+        );
 
         // When active_scope is Local, returns only local
         local_store.active_scope = ScopeSelection::Local;
@@ -2652,7 +2796,13 @@ mod tests {
 
         // Add task with failing eval command
         let card = store
-            .add_task("p0 Failing task", None, vec!["dod item".to_string()], Some("exit 1".to_string()), None)
+            .add_task(
+                "p0 Failing task",
+                None,
+                vec!["dod item".to_string()],
+                Some("exit 1".to_string()),
+                None,
+            )
             .unwrap();
         assert_eq!(card.meta.status, TaskStatus::Ready);
 
@@ -2700,12 +2850,23 @@ mod tests {
 
         // Add task with passing eval command
         store
-            .add_task("p0 Passing task", None, vec![], Some("echo 'all tests green' && exit 0".to_string()), None)
+            .add_task(
+                "p0 Passing task",
+                None,
+                vec![],
+                Some("echo 'all tests green' && exit 0".to_string()),
+                None,
+            )
             .unwrap();
 
         // Submitting for review should succeed and transition to pending-close
         let reviewed = store
-            .submit_for_review("1", "claude", Some("Ready for Ken"), Some("claude -r 123".to_string()))
+            .submit_for_review(
+                "1",
+                "claude",
+                Some("Ready for Ken"),
+                Some("claude -r 123".to_string()),
+            )
             .unwrap();
         assert_eq!(reviewed.meta.status, TaskStatus::PendingClose);
         assert_eq!(reviewed.meta.eval_status.as_deref(), Some("passed"));
@@ -2743,10 +2904,14 @@ mod tests {
             is_uninitialized_local: false,
         };
 
-        store.add_task("p1 Agent work", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 Agent work", None, vec![], None, None)
+            .unwrap();
 
         // An AI agent attempts to directly complete the task
-        let res = store.complete_task("1", "claude", Some("I am done!")).unwrap();
+        let res = store
+            .complete_task("1", "claude", Some("I am done!"))
+            .unwrap();
 
         // Guardrail MUST intercept and force status to pending-close (not done!)
         assert_eq!(res.meta.status, TaskStatus::PendingClose);
@@ -2754,8 +2919,12 @@ mod tests {
 
         // Even if an agent task is called with default_owner ("ken") while in-progress,
         // it must still divert to pending-close first because it has not yet been reviewed!
-        let card2 = store.add_task("p1 Another agent task @claude", None, vec![], None, None).unwrap();
-        let res2 = store.complete_task(&card2.meta.id, "ken", Some("Agent tries to skip review")).unwrap();
+        let card2 = store
+            .add_task("p1 Another agent task @claude", None, vec![], None, None)
+            .unwrap();
+        let res2 = store
+            .complete_task(&card2.meta.id, "ken", Some("Agent tries to skip review"))
+            .unwrap();
         assert_eq!(res2.meta.status, TaskStatus::PendingClose);
         assert_ne!(res2.meta.status, TaskStatus::Done);
 
@@ -2804,7 +2973,9 @@ mod tests {
         assert!(card.body.contains("- [ ] Unit tests pass"));
 
         // Agent submits for review
-        store.submit_for_review("1", "agent", Some("All ready"), None).unwrap();
+        store
+            .submit_for_review("1", "agent", Some("All ready"), None)
+            .unwrap();
 
         // Human completes task at an interactive terminal
         let done_card = store
@@ -2818,7 +2989,11 @@ mod tests {
 
         // Verify lifecycle event was written to .events.jsonl
         let events = store.read_events().unwrap();
-        assert!(events.iter().any(|e| e.action == "completed" && e.to_status == "done" && e.actor == "ken"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.action == "completed" && e.to_status == "done" && e.actor == "ken")
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -2871,11 +3046,21 @@ mod tests {
     }
 
     fn git_available() -> bool {
-        Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success())
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success();
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
         assert!(ok, "git {:?} failed", args);
     }
 
@@ -2885,7 +3070,9 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         let (store, tmp) = hardening_store("lock");
-        let card = store.add_task("p1 Locked card", None, vec![], None, None).unwrap();
+        let card = store
+            .add_task("p1 Locked card", None, vec![], None, None)
+            .unwrap();
         let path = PathBuf::from(&card.path);
 
         let held = TaskStore::lock_card(&path).unwrap();
@@ -2897,7 +3084,10 @@ mod tests {
             flag.store(true, Ordering::SeqCst);
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!acquired.load(Ordering::SeqCst), "second lock acquired while first was held");
+        assert!(
+            !acquired.load(Ordering::SeqCst),
+            "second lock acquired while first was held"
+        );
         drop(held);
         handle.join().unwrap();
         assert!(acquired.load(Ordering::SeqCst));
@@ -2907,26 +3097,48 @@ mod tests {
     #[test]
     fn test_untrusted_caller_cannot_close_pending_review() {
         let (store, tmp) = hardening_store("untrusted");
-        store.add_task("p1 Agent work @claude", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store
+            .add_task(
+                "p1 Agent work @claude",
+                None,
+                vec![],
+                Some("exit 0".to_string()),
+                None,
+            )
+            .unwrap();
         store.submit_for_review("1", "claude", None, None).unwrap();
 
         // Claiming to be the owner by name is not enough.
         let res = store.complete_task("1", "ken", Some("self-approve"));
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("awaiting human sign-off"));
-        assert_eq!(store.find_task("1").unwrap().meta.status, TaskStatus::PendingClose);
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("awaiting human sign-off")
+        );
+        assert_eq!(
+            store.find_task("1").unwrap().meta.status,
+            TaskStatus::PendingClose
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_claim_guards_owner_and_state() {
         let (store, tmp) = hardening_store("claim");
-        store.add_task("p1 Shared work", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 Shared work", None, vec![], None, None)
+            .unwrap();
         store.claim_task("1", "claude", None, false).unwrap();
 
         // Another agent cannot take it silently.
         let steal = store.claim_task("1", "codex", None, false);
-        assert!(steal.unwrap_err().to_string().contains("`claude` is working on it"));
+        assert!(
+            steal
+                .unwrap_err()
+                .to_string()
+                .contains("`claude` is working on it")
+        );
         // Re-claiming your own task is fine.
         store.claim_task("1", "claude", None, false).unwrap();
         // Forced takeover is allowed and recorded.
@@ -2940,7 +3152,9 @@ mod tests {
 
         // Closed work can never be reclaimed.
         store.add_task("p1 Mine", None, vec![], None, None).unwrap();
-        store.complete_task_with("2", "ken", None, Approval::Interactive).unwrap();
+        store
+            .complete_task_with("2", "ken", None, Approval::Interactive)
+            .unwrap();
         assert!(store.claim_task("2", "claude", None, true).is_err());
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -2949,7 +3163,9 @@ mod tests {
     fn test_require_eval_policy_blocks_no_eval_submit() {
         let (mut store, tmp) = hardening_store("require-eval");
         store.config.policy.require_eval = true;
-        store.add_task("p1 Unchecked work", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 Unchecked work", None, vec![], None, None)
+            .unwrap();
         let res = store.submit_for_review("1", "claude", None, None);
         assert!(res.unwrap_err().to_string().contains("require_eval"));
         assert_eq!(store.find_task("1").unwrap().meta.status, TaskStatus::Ready);
@@ -2959,7 +3175,9 @@ mod tests {
     #[test]
     fn test_no_eval_receipt_is_explicit_and_claim_records_eval() {
         let (store, tmp) = hardening_store("no-eval");
-        store.add_task("p1 Light task", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 Light task", None, vec![], None, None)
+            .unwrap();
         store.claim_task("1", "claude", None, false).unwrap();
         let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
         let receipt = reviewed.meta.receipt.unwrap();
@@ -2972,10 +3190,26 @@ mod tests {
     #[test]
     fn test_eval_change_invalidates_review() {
         let (store, tmp) = hardening_store("eval-change");
-        store.add_task("p1 Checked work", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store
+            .add_task(
+                "p1 Checked work",
+                None,
+                vec![],
+                Some("exit 0".to_string()),
+                None,
+            )
+            .unwrap();
         store.submit_for_review("1", "claude", None, None).unwrap();
         let updated = store
-            .update_task("1", None, None, None, None, vec![], Some("true".to_string()))
+            .update_task(
+                "1",
+                None,
+                None,
+                None,
+                None,
+                vec![],
+                Some("true".to_string()),
+            )
             .unwrap();
         assert_eq!(updated.meta.status, TaskStatus::InProgress);
         assert!(updated.meta.receipt.is_none());
@@ -2991,7 +3225,15 @@ mod tests {
         let (store, tmp) = hardening_store("stale");
         git(&tmp, &["init", "-q"]);
         fs::write(tmp.join("work.txt"), "v1").unwrap();
-        store.add_task("p1 Edit work file", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store
+            .add_task(
+                "p1 Edit work file",
+                None,
+                vec![],
+                Some("exit 0".to_string()),
+                None,
+            )
+            .unwrap();
 
         let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
         let snap = reviewed.meta.receipt.as_ref().unwrap().snapshot.clone();
@@ -3007,7 +3249,9 @@ mod tests {
 
         // Re-submitting binds the new output; approval then succeeds.
         store.submit_for_review("1", "claude", None, None).unwrap();
-        let done = store.complete_task_with("1", "ken", None, Approval::Interactive).unwrap();
+        let done = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
         assert_eq!(done.meta.status, TaskStatus::Done);
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -3019,8 +3263,13 @@ mod tests {
     #[test]
     fn test_find_task_ignores_directory_names() {
         let (store, tmp) = hardening_store("findpath-unique");
-        store.add_task("p1 alpha", None, vec![], None, None).unwrap();
-        assert!(store.find_task("findpath").is_err(), "directory name matched a card");
+        store
+            .add_task("p1 alpha", None, vec![], None, None)
+            .unwrap();
+        assert!(
+            store.find_task("findpath").is_err(),
+            "directory name matched a card"
+        );
         assert!(store.find_task("alpha").is_ok());
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -3029,10 +3278,18 @@ mod tests {
     #[test]
     fn test_find_task_ambiguous_query_is_an_error() {
         let (store, tmp) = hardening_store("ambiguous");
-        store.add_task("p1 smoke one", None, vec![], None, None).unwrap();
-        store.add_task("p1 smoke two", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 smoke one", None, vec![], None, None)
+            .unwrap();
+        store
+            .add_task("p1 smoke two", None, vec![], None, None)
+            .unwrap();
         let err = store.find_task("smoke").unwrap_err().to_string();
-        assert!(err.contains("tk-001") && err.contains("tk-002"), "should list candidates: {}", err);
+        assert!(
+            err.contains("tk-001") && err.contains("tk-002"),
+            "should list candidates: {}",
+            err
+        );
         assert_eq!(store.find_task("smoke-two").unwrap().meta.id, "tk-002");
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -3042,14 +3299,21 @@ mod tests {
     fn test_numeric_query_never_matches_a_longer_id() {
         let (store, tmp) = hardening_store("ids");
         let first = store.add_task("p1 seed", None, vec![], None, None).unwrap();
-        let raw = fs::read_to_string(&first.path).unwrap().replace("id: tk-001", "id: tk-999");
+        let raw = fs::read_to_string(&first.path)
+            .unwrap()
+            .replace("id: tk-001", "id: tk-999");
         fs::remove_file(&first.path).unwrap();
         fs::write(store.tasks_path.join("tk-999-seed.md"), raw).unwrap();
-        let big = store.add_task("p1 thousandth", None, vec![], None, None).unwrap();
+        let big = store
+            .add_task("p1 thousandth", None, vec![], None, None)
+            .unwrap();
         assert_eq!(big.meta.id, "tk-1000");
         assert_eq!(store.find_task("1000").unwrap().meta.id, "tk-1000");
         assert_eq!(store.find_task("999").unwrap().meta.id, "tk-999");
-        assert!(store.find_task("100").is_err(), "`100` must not resolve to tk-1000");
+        assert!(
+            store.find_task("100").is_err(),
+            "`100` must not resolve to tk-1000"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -3062,9 +3326,19 @@ mod tests {
         }
         store.add_dependency("2", &["1".to_string()]).unwrap();
         store.add_dependency("3", &["2".to_string()]).unwrap();
-        let err = store.add_dependency("1", &["3".to_string()]).unwrap_err().to_string();
-        assert!(err.contains("cycle"), "expected a cycle error, got: {}", err);
-        assert!(store.find_task("1").unwrap().meta.blocked_by.is_empty(), "cycle edge was written");
+        let err = store
+            .add_dependency("1", &["3".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cycle"),
+            "expected a cycle error, got: {}",
+            err
+        );
+        assert!(
+            store.find_task("1").unwrap().meta.blocked_by.is_empty(),
+            "cycle edge was written"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -3073,10 +3347,22 @@ mod tests {
     fn test_blocked_task_cannot_be_submitted() {
         let (store, tmp) = hardening_store("blocked-submit");
         store.add_task("p1 base", None, vec![], None, None).unwrap();
-        store.add_task("p1 top needs:1", None, vec![], None, None).unwrap();
-        assert_eq!(store.find_task("2").unwrap().meta.status, TaskStatus::Blocked);
-        let err = store.submit_for_review("2", "claude", None, None).unwrap_err().to_string();
-        assert!(err.contains("tk-001"), "should name the open blocker: {}", err);
+        store
+            .add_task("p1 top needs:1", None, vec![], None, None)
+            .unwrap();
+        assert_eq!(
+            store.find_task("2").unwrap().meta.status,
+            TaskStatus::Blocked
+        );
+        let err = store
+            .submit_for_review("2", "claude", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("tk-001"),
+            "should name the open blocker: {}",
+            err
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -3084,9 +3370,14 @@ mod tests {
     #[test]
     fn test_only_the_owner_submits_claimed_work() {
         let (store, tmp) = hardening_store("owner-submit");
-        store.add_task("p1 owned", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 owned", None, vec![], None, None)
+            .unwrap();
         store.claim_task("1", "claude", None, false).unwrap();
-        let err = store.submit_for_review("1", "codex", None, None).unwrap_err().to_string();
+        let err = store
+            .submit_for_review("1", "codex", None, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("claude"), "should name the owner: {}", err);
         store.submit_for_review("1", "claude", None, None).unwrap();
         let _ = fs::remove_dir_all(&tmp);
@@ -3096,7 +3387,13 @@ mod tests {
     fn test_yaml_in_a_title_is_inert() {
         let (store, tmp) = hardening_store("yaml-title");
         let card = store
-            .add_task("p1 innocent\nstatus: done\nowner: mallory", None, vec![], None, None)
+            .add_task(
+                "p1 innocent\nstatus: done\nowner: mallory",
+                None,
+                vec![],
+                None,
+                None,
+            )
             .unwrap();
         let back = TaskStore::read_card(Path::new(&card.path)).unwrap();
         assert_ne!(back.meta.status, TaskStatus::Done);
@@ -3112,12 +3409,24 @@ mod tests {
         let (store, tmp) = hardening_store("unrelated");
         git(&tmp, &["init", "-q"]);
         fs::write(tmp.join("work.txt"), "v1").unwrap();
-        store.add_task("p1 real work", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store
+            .add_task(
+                "p1 real work",
+                None,
+                vec![],
+                Some("exit 0".to_string()),
+                None,
+            )
+            .unwrap();
         store.submit_for_review("1", "claude", None, None).unwrap();
         // Other agents keep creating and editing cards while the review waits.
-        store.add_task("p1 other work", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 other work", None, vec![], None, None)
+            .unwrap();
         store.claim_task("2", "codex", None, false).unwrap();
-        let done = store.complete_task_with("1", "ken", None, Approval::Interactive).unwrap();
+        let done = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
         assert_eq!(done.meta.status, TaskStatus::Done);
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -3129,7 +3438,9 @@ mod tests {
     fn scale_cascade_unblocks_many_dependents_quickly() {
         let (store, tmp) = hardening_store("scale-cascade");
         let n = 1000;
-        store.add_task("p1 blocker", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 blocker", None, vec![], None, None)
+            .unwrap();
         let base = fs::read_to_string(store.find_task("1").unwrap().path).unwrap();
         for i in 2..=n + 1 {
             let id = format!("tk-{:03}", i);
@@ -3140,7 +3451,9 @@ mod tests {
             fs::write(store.tasks_path.join(format!("{}-dep.md", id)), raw).unwrap();
         }
         let start = std::time::Instant::now();
-        store.complete_task_with("1", "ken", None, Approval::Interactive).unwrap();
+        store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
         let took = start.elapsed();
         eprintln!("cascade over {} dependents: {:?}", n, took);
         let ready = store
@@ -3150,7 +3463,11 @@ mod tests {
             .filter(|c| c.meta.status == TaskStatus::Ready)
             .count();
         assert_eq!(ready, n);
-        assert!(took < std::time::Duration::from_secs(5), "cascade too slow: {:?}", took);
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "cascade too slow: {:?}",
+            took
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -3159,25 +3476,37 @@ mod tests {
     #[test]
     fn test_auto_accepted_task_closes_when_its_approved_eval_passes() {
         let (store, tmp) = hardening_store("auto-close");
-        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
-        store.add_task("p1 next needs:1", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 base", None, vec![], Some("exit 0".to_string()), None)
+            .unwrap();
+        store
+            .add_task("p1 next needs:1", None, vec![], None, None)
+            .unwrap();
         let approved = store.approve_eval("1", Approval::Interactive).unwrap();
         assert_eq!(approved.meta.approved_eval.as_deref(), Some("exit 0"));
         store.claim_task("1", "claude", None, false).unwrap();
-        let done = store.submit_for_review("1", "claude", Some("finished"), None).unwrap();
+        let done = store
+            .submit_for_review("1", "claude", Some("finished"), None)
+            .unwrap();
         assert_eq!(done.meta.status, TaskStatus::Done);
         assert_eq!(done.meta.approval.as_deref(), Some("auto:eval"));
         // Auto-closing unblocks dependents like a manual sign-off.
         assert_eq!(store.find_task("2").unwrap().meta.status, TaskStatus::Ready);
         let events = store.read_events().unwrap();
-        assert!(events.iter().any(|e| e.action == "auto-accepted" && e.to_status == "done"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.action == "auto-accepted" && e.to_status == "done")
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_agents_cannot_approve_an_eval() {
         let (store, tmp) = hardening_store("auto-untrusted");
-        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store
+            .add_task("p1 base", None, vec![], Some("exit 0".to_string()), None)
+            .unwrap();
         assert!(store.approve_eval("1", Approval::Untrusted).is_err());
         assert!(store.find_task("1").unwrap().meta.approved_eval.is_none());
         let _ = fs::remove_dir_all(&tmp);
@@ -3186,10 +3515,25 @@ mod tests {
     #[test]
     fn test_changing_the_eval_revokes_auto_accept() {
         let (store, tmp) = hardening_store("auto-revoke");
-        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store
+            .add_task("p1 base", None, vec![], Some("exit 0".to_string()), None)
+            .unwrap();
         store.approve_eval("1", Approval::Interactive).unwrap();
-        let changed = store.update_task("1", None, None, None, None, vec![], Some("true".to_string())).unwrap();
-        assert!(changed.meta.approved_eval.is_none(), "eval change must revoke the approval");
+        let changed = store
+            .update_task(
+                "1",
+                None,
+                None,
+                None,
+                None,
+                vec![],
+                Some("true".to_string()),
+            )
+            .unwrap();
+        assert!(
+            changed.meta.approved_eval.is_none(),
+            "eval change must revoke the approval"
+        );
         let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
         assert_eq!(reviewed.meta.status, TaskStatus::PendingClose);
         let _ = fs::remove_dir_all(&tmp);
@@ -3198,7 +3542,9 @@ mod tests {
     #[test]
     fn test_a_failing_approved_eval_does_not_close() {
         let (store, tmp) = hardening_store("auto-fail");
-        store.add_task("p1 base", None, vec![], Some("exit 1".to_string()), None).unwrap();
+        store
+            .add_task("p1 base", None, vec![], Some("exit 1".to_string()), None)
+            .unwrap();
         store.approve_eval("1", Approval::Interactive).unwrap();
         assert!(store.submit_for_review("1", "claude", None, None).is_err());
         assert_eq!(store.find_task("1").unwrap().meta.status, TaskStatus::Ready);
@@ -3209,7 +3555,10 @@ mod tests {
     fn test_tasks_without_an_eval_cannot_auto_accept() {
         let (store, tmp) = hardening_store("auto-noeval");
         store.add_task("p1 base", None, vec![], None, None).unwrap();
-        let err = store.approve_eval("1", Approval::Interactive).unwrap_err().to_string();
+        let err = store
+            .approve_eval("1", Approval::Interactive)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("eval"), "{}", err);
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -3217,7 +3566,9 @@ mod tests {
     #[test]
     fn test_revoking_auto_accept_returns_to_manual_review() {
         let (store, tmp) = hardening_store("auto-off");
-        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store
+            .add_task("p1 base", None, vec![], Some("exit 0".to_string()), None)
+            .unwrap();
         store.approve_eval("1", Approval::Interactive).unwrap();
         store.revoke_eval_approval("1").unwrap();
         let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();

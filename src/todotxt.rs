@@ -24,7 +24,9 @@ pub fn resolve_natural_date(raw: &str) -> String {
         "next-week" | "1w" | "+7d" => (today + Duration::days(7)).format("%Y-%m-%d").to_string(),
         s if s.starts_with('+') && s.ends_with('d') => {
             if let Ok(days) = s[1..s.len() - 1].parse::<i64>() {
-                (today + Duration::days(days)).format("%Y-%m-%d").to_string()
+                (today + Duration::days(days))
+                    .format("%Y-%m-%d")
+                    .to_string()
             } else {
                 raw.to_string()
             }
@@ -70,35 +72,43 @@ pub fn parse_todotxt(input: &str, default_owner: &str) -> ParsedTodo {
 
         // 2. @owner (e.g. @ken, @hermes, @pi, @codex, @claude)
         if let Some(rest) = token.strip_prefix('@')
-            && !rest.is_empty() {
-                owner = rest.to_lowercase();
-                continue;
-            }
+            && !rest.is_empty()
+        {
+            owner = rest.to_lowercase();
+            continue;
+        }
 
         // 3. +project (e.g. +emba -> [[emba]], +agent-os -> [[agent-os]])
         if let Some(rest) = token.strip_prefix('+')
-            && !rest.is_empty() {
-                project = Some(format!("[[{}]]", rest));
-                if !tags.contains(&rest.to_lowercase()) {
-                    tags.push(rest.to_lowercase());
-                }
-                continue;
+            && !rest.is_empty()
+        {
+            project = Some(format!("[[{}]]", rest));
+            if !tags.contains(&rest.to_lowercase()) {
+                tags.push(rest.to_lowercase());
             }
+            continue;
+        }
 
         // 4. #tag (e.g. #ai-tools)
         if let Some(rest) = token.strip_prefix('#')
-            && !rest.is_empty() {
-                tags.push(rest.to_lowercase());
-                continue;
-            }
+            && !rest.is_empty()
+        {
+            tags.push(rest.to_lowercase());
+            continue;
+        }
 
         // 5. ~duration estimate (e.g. ~15m, ~2h, ~45s, ~3d)
         if let Some(rest) = token.strip_prefix('~')
             && !rest.is_empty()
-            && (rest.ends_with('s') || rest.ends_with('m') || rest.ends_with('h') || rest.ends_with('d') || rest.ends_with('w')) {
-                duration = Some(rest.to_lowercase());
-                continue;
-            }
+            && (rest.ends_with('s')
+                || rest.ends_with('m')
+                || rest.ends_with('h')
+                || rest.ends_with('d')
+                || rest.ends_with('w'))
+        {
+            duration = Some(rest.to_lowercase());
+            continue;
+        }
 
         // 6. key:value pairs (due:tomorrow, due:+3d, dur:15m, est:2h, p:P1, owner:pi, sid:8y9380573586)
         if let Some((k, v)) = token.split_once(':') {
