@@ -248,11 +248,28 @@ pub struct AppConfig {
 }
 
 /// `[policy]` guardrails for the submit -> review -> accept lifecycle.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     /// Refuse `pending-close` for tasks with no `eval` command (instead of auto-passing as `no-eval`).
     #[serde(default)]
     pub require_eval: bool,
+    /// Kill an eval (and everything it started) after this many seconds; `0` means no limit.
+    /// Evals run under the card lock, so a hung eval would otherwise block that card forever.
+    #[serde(default = "default_eval_timeout")]
+    pub eval_timeout_secs: u64,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            require_eval: false,
+            eval_timeout_secs: default_eval_timeout(),
+        }
+    }
+}
+
+fn default_eval_timeout() -> u64 {
+    600
 }
 
 /// How a caller asks to close a task. Only the CLI, after checking for a human at a
@@ -340,7 +357,7 @@ impl TaskStore {
         let config: AppConfig = if cfg_path.exists() {
             let raw = fs::read_to_string(&cfg_path)
                 .with_context(|| format!("Failed reading {:?}", cfg_path))?;
-            toml::from_str(&raw).unwrap_or_default()
+            toml::from_str(&raw).with_context(|| format!("Invalid tkmd config {:?}", cfg_path))?
         } else {
             let def = AppConfig::default();
             if let Some(parent) = cfg_path.parent() {
@@ -411,17 +428,7 @@ impl TaskStore {
         let config: AppConfig = if let Some(p) = cfg_file {
             let raw = fs::read_to_string(&p)
                 .with_context(|| format!("Failed reading local config {:?}", p))?;
-            toml::from_str(&raw).unwrap_or_else(|_| AppConfig {
-                mode: "cli".to_string(),
-                vault_path: root.to_string_lossy().to_string(),
-                tasks_dir: "tasks".to_string(),
-                base_file: String::new(),
-                daily_dir: String::new(),
-                default_owner: user,
-                obsidian_vault_name: None,
-                editor: Some(detect_editor()),
-                policy: Policy::default(),
-            })
+            toml::from_str(&raw).with_context(|| format!("Invalid tkmd config {:?}", p))?
         } else {
             AppConfig {
                 mode: "cli".to_string(),
@@ -991,6 +998,9 @@ views:
         if parsed.title.is_empty() {
             bail!("Task title cannot be empty");
         }
+        // Serialize id allocation across processes: without this, racing agents reuse ids.
+        fs::create_dir_all(&self.tasks_path)?;
+        let _store_lock = Self::lock_card(&self.tasks_path)?;
         let id = self.next_id()?;
         let slug = slugify(&parsed.title);
         let filename = format!("{}-{}.md", id, slug);
@@ -1043,6 +1053,7 @@ views:
             claimed_eval: None,
             receipt: None,
             approval: None,
+            approved_eval: None,
             created: today.clone(),
             updated: today,
             _organized: true,
@@ -1092,27 +1103,50 @@ views:
         Ok(card)
     }
 
+    /// Resolve a task by id (`7`, `tk-7`, `tk-007`) or by a unique fragment of its file name.
+    /// Ids match exactly. A name fragment matching several cards is an error listing them,
+    /// so `tk d smoke` can never close the wrong task.
     pub fn find_task(&self, query: &str) -> Result<TaskCard> {
-        let normalized = if let Ok(n) = query.parse::<u32>() {
-            format!("tk-{:03}", n)
-        } else {
-            query.to_lowercase()
-        };
+        let q = query.trim().to_lowercase();
+        let digits = q.strip_prefix("tk-").unwrap_or(&q);
+        let id_query = digits.parse::<u32>().ok().map(|n| format!("tk-{:03}", n));
 
         let cards = self.list_store_cards()?;
-        for card in cards {
-            if card.meta.id.to_lowercase() == normalized
-                || card.path.to_lowercase().contains(&normalized)
-            {
+        if let Some(id) = &id_query {
+            if let Some(card) = cards.into_iter().find(|c| c.meta.id.eq_ignore_ascii_case(id)) {
                 return Ok(card);
+            }
+        } else if !q.is_empty() {
+            let mut matches: Vec<TaskCard> = cards
+                .into_iter()
+                .filter(|c| {
+                    Path::new(&c.path)
+                        .file_stem()
+                        .and_then(|f| f.to_str())
+                        .is_some_and(|f| f.to_lowercase().contains(&q))
+                })
+                .collect();
+            match matches.len() {
+                0 => {}
+                1 => return Ok(matches.remove(0)),
+                _ => bail!(
+                    "'{}' matches {} tasks: {}. Use an id",
+                    query,
+                    matches.len(),
+                    matches
+                        .iter()
+                        .map(|c| format!("{} ({})", c.meta.id, c.meta.title))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             }
         }
 
         if (self.active_scope == ScopeSelection::Auto || self.active_scope == ScopeSelection::All)
             && let Some(ref peer) = self.peer
-            && let Ok(card) = peer.find_task(query) {
-                return Ok(card);
-            }
+        {
+            return peer.find_task(query);
+        }
 
         bail!("Task '{}' not found", query)
     }
@@ -1157,29 +1191,9 @@ views:
             _ => {}
         }
 
-        // Check if task is blocked by incomplete tasks
-        if !card.meta.blocked_by.is_empty() {
-            let all_cards = self.list_all()?;
-            let open_blockers: Vec<String> = card
-                .meta
-                .blocked_by
-                .iter()
-                .filter(|bid| {
-                    if let Some(target) = all_cards.iter().find(|c| c.meta.id.eq_ignore_ascii_case(bid)) {
-                        target.meta.status != TaskStatus::Done && target.meta.status != TaskStatus::Archived
-                    } else {
-                        false
-                    }
-                })
-                .cloned()
-                .collect();
-            if !open_blockers.is_empty() {
-                bail!(
-                    "Cannot claim {} — Blocked by open task(s): {}",
-                    card.meta.id,
-                    open_blockers.join(", ")
-                );
-            }
+        let open = self.open_blockers(&card)?;
+        if !open.is_empty() {
+            bail!("Cannot claim {} — Blocked by open task(s): {}", card.meta.id, open.join(", "));
         }
 
         let takeover = if force && !card.meta.owner.eq_ignore_ascii_case(&new_owner) {
@@ -1224,6 +1238,25 @@ views:
             &card.meta.title,
         )?;
         Ok(card)
+    }
+
+    /// Ids in `card.blocked_by` that are not yet done or archived (unknown ids count as closed).
+    fn open_blockers(&self, card: &TaskCard) -> Result<Vec<String>> {
+        if card.meta.blocked_by.is_empty() {
+            return Ok(Vec::new());
+        }
+        let all = self.list_all()?;
+        Ok(card
+            .meta
+            .blocked_by
+            .iter()
+            .filter(|bid| {
+                all.iter()
+                    .find(|c| c.meta.id.eq_ignore_ascii_case(bid))
+                    .is_some_and(|t| !matches!(t.meta.status, TaskStatus::Done | TaskStatus::Archived))
+            })
+            .cloned()
+            .collect())
     }
 
     /// Runs the task's `eval` shell command (if configured) and records pass/fail on the card.
@@ -1282,10 +1315,26 @@ views:
             c
         };
 
-        let output = cmd
-            .current_dir(&self.config.vault_path)
-            .output()
+        cmd.current_dir(&self.config.vault_path);
+        let timeout = match self.config.policy.eval_timeout_secs {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(secs)),
+        };
+        let output = run_with_timeout(cmd, timeout)
             .with_context(|| format!("Failed to execute eval command: {}", cmd_str))?;
+        let Some(output) = output else {
+            let secs = self.config.policy.eval_timeout_secs;
+            card.meta.eval_status = Some("failed".to_string());
+            card.body = format!(
+                "{}\n- `{}`: Eval `{}` run by `{}` -> **TIMED OUT ⏱** (after {}s).",
+                card.body.trim_end(),
+                now_ts,
+                cmd_str,
+                actor,
+                secs
+            );
+            return Ok((false, format!("eval timed out after {}s ([policy].eval_timeout_secs)", secs)));
+        };
 
         let passed = output.status.success();
         let stdout_s = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1336,6 +1385,19 @@ views:
         if matches!(card.meta.status, TaskStatus::Done | TaskStatus::Archived) {
             bail!("Cannot submit {}: it is already `{}`", card.meta.id, card.meta.status.as_str());
         }
+        let open = self.open_blockers(&card)?;
+        if !open.is_empty() {
+            bail!("Cannot submit {}: still blocked by open task(s): {}", card.meta.id, open.join(", "));
+        }
+        let submitter = actor.trim().trim_start_matches('@').to_lowercase();
+        if card.meta.status == TaskStatus::InProgress && !card.meta.owner.eq_ignore_ascii_case(&submitter) {
+            bail!(
+                "Cannot submit {}: `{}` claimed it. Only the owner submits; take it over with `tk c {} --force`",
+                card.meta.id,
+                card.meta.owner,
+                card.meta.id
+            );
+        }
         if self.config.policy.require_eval && card.meta.eval.is_none() {
             bail!(
                 "Cannot submit {}: [policy].require_eval is on and the task has no eval command. Add one with `tk set {} --eval '<cmd>'`",
@@ -1377,6 +1439,7 @@ views:
             submitted_by: actor.to_string(),
             submitted_at: Local::now().to_rfc3339(),
         });
+        let auto_accept = card.meta.eval.is_some() && card.meta.approved_eval == card.meta.eval;
         card.meta.status = TaskStatus::PendingClose;
         card.meta.updated = Local::now().format("%Y-%m-%d").to_string();
         let suffix = match note {
@@ -1398,6 +1461,37 @@ views:
         );
 
         Self::sync_card_sessions(&mut card);
+
+        if auto_accept {
+            // The human approved this exact check in advance; its pass is the sign-off.
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            card.meta.status = TaskStatus::Done;
+            card.meta.approval = Some("auto:eval".to_string());
+            card.body = card.body.replace("- [ ] ", "- [x] ");
+            card.body = format!(
+                "{}\n- `{}`: Auto-accepted (`done`): eval `{}` approved by `{}` passed ✅.",
+                card.body.trim_end(),
+                now_ts,
+                card.meta.eval.as_deref().unwrap_or(""),
+                self.config.default_owner
+            );
+            self.write_card(&card)?;
+            self.log_event(
+                &card.meta.id,
+                "auto-accepted",
+                actor,
+                card.meta.session_id.as_deref(),
+                Some(&prev),
+                "done",
+                Some(true),
+                &card.meta.title,
+            )?;
+            self.log_to_daily_note(&card, note)?;
+            drop(_lock);
+            self.cascade_unblock(&card.meta.id, &today, &now_ts)?;
+            return Ok(card);
+        }
+
         self.write_card(&card)?;
         self.log_event(
             &card.meta.id,
@@ -1409,6 +1503,60 @@ views:
             Some(true),
             &card.meta.title,
         )?;
+        Ok(card)
+    }
+
+    /// Approve a task's current eval for auto-acceptance: when the owner submits and this exact
+    /// check passes, the task closes without a manual sign-off. Human-only (`Interactive`).
+    pub fn approve_eval(&self, query: &str, approval: Approval) -> Result<TaskCard> {
+        if approval == Approval::Untrusted {
+            bail!("Only a person at an interactive terminal can approve an eval for auto-accept (`tk auto`)");
+        }
+        let found = self.find_task(query)?;
+        let _lock = Self::lock_card(Path::new(&found.path))?;
+        let mut card = Self::read_card(Path::new(&found.path))?;
+        card.scope = found.scope;
+        if matches!(card.meta.status, TaskStatus::Done | TaskStatus::Archived) {
+            bail!("{} is already `{}`", card.meta.id, card.meta.status.as_str());
+        }
+        let Some(eval) = card.meta.eval.clone() else {
+            bail!(
+                "{} has no eval to approve. Add one first: `tk set {} --eval '<cmd>'`",
+                card.meta.id,
+                card.meta.id
+            );
+        };
+        card.meta.approved_eval = Some(eval.clone());
+        card.meta.updated = Local::now().format("%Y-%m-%d").to_string();
+        card.body = format!(
+            "{}\n- `{}`: Auto-accept on: closes when eval `{}` passes (approved by `{}`).",
+            card.body.trim_end(),
+            Local::now().format("%Y-%m-%d %H:%M"),
+            eval,
+            self.config.default_owner
+        );
+        self.write_card(&card)?;
+        let st = card.meta.status.as_str().to_string();
+        self.log_event(&card.meta.id, "eval-approved", &self.config.default_owner, None, Some(&st), &st, None, &card.meta.title)?;
+        Ok(card)
+    }
+
+    /// Turn auto-accept off: the task goes back to manual sign-off. Anyone may revoke.
+    pub fn revoke_eval_approval(&self, query: &str) -> Result<TaskCard> {
+        let found = self.find_task(query)?;
+        let _lock = Self::lock_card(Path::new(&found.path))?;
+        let mut card = Self::read_card(Path::new(&found.path))?;
+        card.scope = found.scope;
+        if card.meta.approved_eval.take().is_some() {
+            card.body = format!(
+                "{}\n- `{}`: Auto-accept off: manual sign-off required.",
+                card.body.trim_end(),
+                Local::now().format("%Y-%m-%d %H:%M")
+            );
+            self.write_card(&card)?;
+            let st = card.meta.status.as_str().to_string();
+            self.log_event(&card.meta.id, "eval-approval-revoked", "system", None, Some(&st), &st, None, &card.meta.title)?;
+        }
         Ok(card)
     }
 
@@ -1549,7 +1697,15 @@ views:
 
     /// Promote `blocked` tasks whose blockers are now all closed. Locks each card it rewrites.
     fn cascade_unblock(&self, completed_id: &str, today: &str, now_ts: &str) -> Result<()> {
-        for other in self.list_all()? {
+        let all = self.list_all()?;
+        // One status snapshot for the whole cascade: re-reading every card per dependent is quadratic.
+        let open: std::collections::HashSet<String> = all
+            .iter()
+            .filter(|c| !matches!(c.meta.status, TaskStatus::Done | TaskStatus::Archived))
+            .map(|c| c.meta.id.to_lowercase())
+            .filter(|id| !id.eq_ignore_ascii_case(completed_id))
+            .collect();
+        for other in all {
             if !other.meta.blocked_by.iter().any(|b| b.eq_ignore_ascii_case(completed_id)) {
                 continue;
             }
@@ -1567,16 +1723,7 @@ views:
                 .meta
                 .blocked_by
                 .iter()
-                .filter(|bid| {
-                    if bid.eq_ignore_ascii_case(completed_id) {
-                        return false;
-                    }
-                    if let Ok(b_card) = self.find_task(bid) {
-                        b_card.meta.status != TaskStatus::Done && b_card.meta.status != TaskStatus::Archived
-                    } else {
-                        false
-                    }
-                })
+                .filter(|bid| open.contains(&bid.to_lowercase()))
                 .count();
 
             if remaining_blockers == 0 {
@@ -1722,6 +1869,10 @@ views:
                 card.body = format!("{}\n\n{}\n", card.body.trim_end(), eval_block);
             }
             changes.push(format!("eval -> '{}'", e));
+            if card.meta.approved_eval.as_deref().is_some_and(|a| a != e) {
+                card.meta.approved_eval = None;
+                changes.push("auto-accept revoked (eval changed)".to_string());
+            }
             // Changing the check invalidates any review built on the old one.
             if card.meta.status == TaskStatus::PendingClose {
                 card.meta.status = TaskStatus::InProgress;
@@ -1755,6 +1906,37 @@ views:
                 bail!("Task cannot depend on itself: {}", found.meta.id);
             }
             blockers.push(blocker);
+        }
+
+        // Refuse edges that would close a cycle: walk each blocker's own dependencies.
+        let graph: std::collections::HashMap<String, Vec<String>> = self
+            .list_all()?
+            .into_iter()
+            .map(|c| (c.meta.id.to_lowercase(), c.meta.blocked_by.iter().map(|b| b.to_lowercase()).collect()))
+            .collect();
+        let target = found.meta.id.to_lowercase();
+        for blocker in &blockers {
+            let mut stack = vec![(blocker.meta.id.to_lowercase(), vec![blocker.meta.id.clone()])];
+            let mut seen = std::collections::HashSet::new();
+            while let Some((node, path)) = stack.pop() {
+                if node == target {
+                    bail!(
+                        "Dependency cycle: {} would wait on {}, which already waits on it ({} -> {})",
+                        found.meta.id,
+                        blocker.meta.id,
+                        path.join(" -> "),
+                        found.meta.id
+                    );
+                }
+                if !seen.insert(node.clone()) {
+                    continue;
+                }
+                for next in graph.get(&node).into_iter().flatten() {
+                    let mut p = path.clone();
+                    p.push(next.to_uppercase().replace("TK-", "tk-"));
+                    stack.push((next.clone(), p));
+                }
+            }
         }
 
         // Update each blocker's `blocks` array under its own lock (one card locked at a time).
@@ -2134,6 +2316,70 @@ pub fn slugify(title: &str) -> String {
     }
     let trimmed = out.trim_matches('-').to_string();
     trimmed.chars().take(45).collect::<String>().trim_end_matches('-').to_string()
+}
+
+/// Run a command, killing it and every process it started if it outlives `timeout`.
+/// Returns `Ok(None)` on timeout. stdout and stderr are drained on threads so a chatty eval
+/// cannot fill a pipe and stall.
+fn run_with_timeout(
+    mut cmd: Command,
+    timeout: Option<std::time::Duration>,
+) -> std::io::Result<Option<std::process::Output>> {
+    use std::io::Read;
+    use std::process::Stdio;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = p.read_to_end(&mut b);
+        }
+        b
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_end(&mut b);
+        }
+        b
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break Some(st);
+        }
+        if timeout.is_some_and(|t| start.elapsed() >= t) {
+            kill_process_tree(&mut child);
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stdout = out_t.join().unwrap_or_default();
+    let stderr = err_t.join().unwrap_or_default();
+    Ok(status.map(|status| std::process::Output { status, stdout, stderr }))
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        const SIGKILL: i32 = 9;
+        // The child leads its own process group, so -pid reaches everything it spawned.
+        unsafe { kill(-(child.id() as i32), SIGKILL) };
+    }
+    let _ = child.kill();
 }
 
 /// Run `git -C <dir> <args>`, optionally against a throwaway index. `None` on any failure.
@@ -2747,6 +2993,219 @@ mod tests {
         store.submit_for_review("1", "claude", None, None).unwrap();
         let done = store.complete_task_with("1", "ken", None, Approval::Interactive).unwrap();
         assert_eq!(done.meta.status, TaskStatus::Done);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ---- Edge cases (TDD: RED marks behaviour the pre-change code got wrong) ----
+
+    /// RED: `find_task` matched the query anywhere in the full path, so a word from a parent
+    /// directory selected the first card in the store.
+    #[test]
+    fn test_find_task_ignores_directory_names() {
+        let (store, tmp) = hardening_store("findpath-unique");
+        store.add_task("p1 alpha", None, vec![], None, None).unwrap();
+        assert!(store.find_task("findpath").is_err(), "directory name matched a card");
+        assert!(store.find_task("alpha").is_ok());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: an ambiguous slug query silently picked the first match (dangerous for `tk d`).
+    #[test]
+    fn test_find_task_ambiguous_query_is_an_error() {
+        let (store, tmp) = hardening_store("ambiguous");
+        store.add_task("p1 smoke one", None, vec![], None, None).unwrap();
+        store.add_task("p1 smoke two", None, vec![], None, None).unwrap();
+        let err = store.find_task("smoke").unwrap_err().to_string();
+        assert!(err.contains("tk-001") && err.contains("tk-002"), "should list candidates: {}", err);
+        assert_eq!(store.find_task("smoke-two").unwrap().meta.id, "tk-002");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: numeric queries fell through to substring path matching, so `100` hit `tk-1000`.
+    #[test]
+    fn test_numeric_query_never_matches_a_longer_id() {
+        let (store, tmp) = hardening_store("ids");
+        let first = store.add_task("p1 seed", None, vec![], None, None).unwrap();
+        let raw = fs::read_to_string(&first.path).unwrap().replace("id: tk-001", "id: tk-999");
+        fs::remove_file(&first.path).unwrap();
+        fs::write(store.tasks_path.join("tk-999-seed.md"), raw).unwrap();
+        let big = store.add_task("p1 thousandth", None, vec![], None, None).unwrap();
+        assert_eq!(big.meta.id, "tk-1000");
+        assert_eq!(store.find_task("1000").unwrap().meta.id, "tk-1000");
+        assert_eq!(store.find_task("999").unwrap().meta.id, "tk-999");
+        assert!(store.find_task("100").is_err(), "`100` must not resolve to tk-1000");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: `add_dependency` accepted cycles, which deadlock the schedule.
+    #[test]
+    fn test_dependency_cycle_is_rejected() {
+        let (store, tmp) = hardening_store("cycle");
+        for t in ["p1 a", "p1 b", "p1 c"] {
+            store.add_task(t, None, vec![], None, None).unwrap();
+        }
+        store.add_dependency("2", &["1".to_string()]).unwrap();
+        store.add_dependency("3", &["2".to_string()]).unwrap();
+        let err = store.add_dependency("1", &["3".to_string()]).unwrap_err().to_string();
+        assert!(err.contains("cycle"), "expected a cycle error, got: {}", err);
+        assert!(store.find_task("1").unwrap().meta.blocked_by.is_empty(), "cycle edge was written");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: a blocked task (open dependencies) could be submitted for review.
+    #[test]
+    fn test_blocked_task_cannot_be_submitted() {
+        let (store, tmp) = hardening_store("blocked-submit");
+        store.add_task("p1 base", None, vec![], None, None).unwrap();
+        store.add_task("p1 top needs:1", None, vec![], None, None).unwrap();
+        assert_eq!(store.find_task("2").unwrap().meta.status, TaskStatus::Blocked);
+        let err = store.submit_for_review("2", "claude", None, None).unwrap_err().to_string();
+        assert!(err.contains("tk-001"), "should name the open blocker: {}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: any agent could submit another agent's claimed work.
+    #[test]
+    fn test_only_the_owner_submits_claimed_work() {
+        let (store, tmp) = hardening_store("owner-submit");
+        store.add_task("p1 owned", None, vec![], None, None).unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        let err = store.submit_for_review("1", "codex", None, None).unwrap_err().to_string();
+        assert!(err.contains("claude"), "should name the owner: {}", err);
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_yaml_in_a_title_is_inert() {
+        let (store, tmp) = hardening_store("yaml-title");
+        let card = store
+            .add_task("p1 innocent\nstatus: done\nowner: mallory", None, vec![], None, None)
+            .unwrap();
+        let back = TaskStore::read_card(Path::new(&card.path)).unwrap();
+        assert_ne!(back.meta.status, TaskStatus::Done);
+        assert_ne!(back.meta.owner, "mallory");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_receipt_survives_unrelated_card_changes() {
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("unrelated");
+        git(&tmp, &["init", "-q"]);
+        fs::write(tmp.join("work.txt"), "v1").unwrap();
+        store.add_task("p1 real work", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        // Other agents keep creating and editing cards while the review waits.
+        store.add_task("p1 other work", None, vec![], None, None).unwrap();
+        store.claim_task("2", "codex", None, false).unwrap();
+        let done = store.complete_task_with("1", "ken", None, Approval::Interactive).unwrap();
+        assert_eq!(done.meta.status, TaskStatus::Done);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Scale: one blocker with many dependents. RED (predicted): the cascade re-read every card
+    /// for every dependent (quadratic). Run with `cargo test --release -- --ignored`.
+    #[test]
+    #[ignore]
+    fn scale_cascade_unblocks_many_dependents_quickly() {
+        let (store, tmp) = hardening_store("scale-cascade");
+        let n = 1000;
+        store.add_task("p1 blocker", None, vec![], None, None).unwrap();
+        let base = fs::read_to_string(store.find_task("1").unwrap().path).unwrap();
+        for i in 2..=n + 1 {
+            let id = format!("tk-{:03}", i);
+            let raw = base
+                .replace("id: tk-001", &format!("id: {}", id))
+                .replace("status: ready", "status: blocked")
+                .replacen("---\n", "---\nblocked_by:\n- tk-001\n", 1);
+            fs::write(store.tasks_path.join(format!("{}-dep.md", id)), raw).unwrap();
+        }
+        let start = std::time::Instant::now();
+        store.complete_task_with("1", "ken", None, Approval::Interactive).unwrap();
+        let took = start.elapsed();
+        eprintln!("cascade over {} dependents: {:?}", n, took);
+        let ready = store
+            .list_store_cards()
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.meta.status == TaskStatus::Ready)
+            .count();
+        assert_eq!(ready, n);
+        assert!(took < std::time::Duration::from_secs(5), "cascade too slow: {:?}", took);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ---- Contract approval: the human approves the check, the agent delivers against it ----
+
+    #[test]
+    fn test_auto_accepted_task_closes_when_its_approved_eval_passes() {
+        let (store, tmp) = hardening_store("auto-close");
+        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store.add_task("p1 next needs:1", None, vec![], None, None).unwrap();
+        let approved = store.approve_eval("1", Approval::Interactive).unwrap();
+        assert_eq!(approved.meta.approved_eval.as_deref(), Some("exit 0"));
+        store.claim_task("1", "claude", None, false).unwrap();
+        let done = store.submit_for_review("1", "claude", Some("finished"), None).unwrap();
+        assert_eq!(done.meta.status, TaskStatus::Done);
+        assert_eq!(done.meta.approval.as_deref(), Some("auto:eval"));
+        // Auto-closing unblocks dependents like a manual sign-off.
+        assert_eq!(store.find_task("2").unwrap().meta.status, TaskStatus::Ready);
+        let events = store.read_events().unwrap();
+        assert!(events.iter().any(|e| e.action == "auto-accepted" && e.to_status == "done"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_agents_cannot_approve_an_eval() {
+        let (store, tmp) = hardening_store("auto-untrusted");
+        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        assert!(store.approve_eval("1", Approval::Untrusted).is_err());
+        assert!(store.find_task("1").unwrap().meta.approved_eval.is_none());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_changing_the_eval_revokes_auto_accept() {
+        let (store, tmp) = hardening_store("auto-revoke");
+        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store.approve_eval("1", Approval::Interactive).unwrap();
+        let changed = store.update_task("1", None, None, None, None, vec![], Some("true".to_string())).unwrap();
+        assert!(changed.meta.approved_eval.is_none(), "eval change must revoke the approval");
+        let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
+        assert_eq!(reviewed.meta.status, TaskStatus::PendingClose);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_a_failing_approved_eval_does_not_close() {
+        let (store, tmp) = hardening_store("auto-fail");
+        store.add_task("p1 base", None, vec![], Some("exit 1".to_string()), None).unwrap();
+        store.approve_eval("1", Approval::Interactive).unwrap();
+        assert!(store.submit_for_review("1", "claude", None, None).is_err());
+        assert_eq!(store.find_task("1").unwrap().meta.status, TaskStatus::Ready);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_tasks_without_an_eval_cannot_auto_accept() {
+        let (store, tmp) = hardening_store("auto-noeval");
+        store.add_task("p1 base", None, vec![], None, None).unwrap();
+        let err = store.approve_eval("1", Approval::Interactive).unwrap_err().to_string();
+        assert!(err.contains("eval"), "{}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_revoking_auto_accept_returns_to_manual_review() {
+        let (store, tmp) = hardening_store("auto-off");
+        store.add_task("p1 base", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store.approve_eval("1", Approval::Interactive).unwrap();
+        store.revoke_eval_approval("1").unwrap();
+        let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
+        assert_eq!(reviewed.meta.status, TaskStatus::PendingClose);
         let _ = fs::remove_dir_all(&tmp);
     }
 }

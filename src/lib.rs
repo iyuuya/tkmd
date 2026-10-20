@@ -346,6 +346,16 @@ enum Commands {
         #[arg(long)]
         color: bool,
     },
+    /// Approve a task's eval so the task closes itself when that check passes on submit.
+    /// Human-only: run it at a terminal. `--off` returns the task(s) to manual sign-off.
+    Auto {
+        /// Task ID(s) (e.g. 1 or tk-001; several: `tk auto 1 2 3`)
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Turn auto-accept off (manual sign-off again)
+        #[arg(long)]
+        off: bool,
+    },
     /// Archive completed tasks: moves done task .md cards into tasks/archive/ (preserves .events.jsonl DB)
     Archive {
         /// Optional specific Task ID to archive
@@ -1096,6 +1106,9 @@ pub fn run() -> Result<()> {
             }
             if !card.meta.blocks.is_empty() {
                 println!("{DIM}Blocks:{RESET}     {AQUA}{}{RESET}", card.meta.blocks.join(", "));
+            }
+            if let Some(a) = &card.meta.approved_eval {
+                println!("{DIM}Auto-accept:{RESET} {GREEN}closes when `{}` passes{RESET}", a);
             }
             println!("{DIM}File:       {}{RESET}\n", card.path);
             println!("{}", card.body);
@@ -2020,6 +2033,38 @@ pub fn run() -> Result<()> {
                 }
             }
         }
+        Commands::Auto { ids, off } => {
+            let cards = ids.iter().map(|id| store.find_task(id)).collect::<Result<Vec<_>>>()?;
+            if off {
+                for c in &cards {
+                    store.revoke_eval_approval(&c.meta.id)?;
+                    println!("{ORANGE}⏸ Auto-accept off{RESET} {BOLD}{}{RESET}: manual sign-off", c.meta.id);
+                }
+                return Ok(());
+            }
+            let approval = if is_interactive() {
+                let mut err = std::io::stderr();
+                use std::io::Write;
+                writeln!(err, "{BOLD}Auto-accept ({} task(s)):{RESET} each closes itself when this check passes", cards.len())?;
+                for c in &cards {
+                    writeln!(err, "  {BOLD}{}{RESET} {}: `{}`", c.meta.id, c.meta.title, c.meta.eval.as_deref().unwrap_or("(no eval: cannot auto-accept)"))?;
+                }
+                if !confirm("Approve these checks?")? {
+                    anyhow::bail!("Not approved: nothing changed");
+                }
+                Approval::Interactive
+            } else {
+                Approval::Untrusted
+            };
+            for c in &cards {
+                let card = store.approve_eval(&c.meta.id, approval)?;
+                println!(
+                    "{GREEN}⚡ Auto-accept on{RESET} {BOLD}{}{RESET}: closes when `{}` passes",
+                    card.meta.id,
+                    card.meta.approved_eval.as_deref().unwrap_or("")
+                );
+            }
+        }
         Commands::Archive { id } => {
             let archived = store.archive_tasks(id.as_deref())?;
             if archived.is_empty() {
@@ -2251,8 +2296,8 @@ fn done_targets(store: &TaskStore, ids: &[String], pending: bool) -> Result<Vec<
 /// Limitation: an agent that allocates its own pseudo-terminal passes the TTY check. This is a
 /// workflow harness, not authentication.
 fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
-    use std::io::{BufRead, IsTerminal, Write};
-    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+    use std::io::Write;
+    if !is_interactive() {
         return Ok(Approval::Untrusted);
     }
     // Only cards that would actually close need sign-off; agent-owned work is routed to review.
@@ -2298,14 +2343,27 @@ fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
     } else {
         format!("all {}", closing.len())
     };
-    write!(err, "Approve and close {}? [y/N] ", target)?;
-    err.flush()?;
-    let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
-    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+    if !confirm(&format!("Approve and close {}?", target))? {
         anyhow::bail!("Not approved: nothing closed");
     }
     Ok(Approval::Interactive)
+}
+
+/// A person is at the keyboard: stdin and stderr are both terminals.
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Ask a yes/no question on stderr; only `y`/`yes` counts as yes.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::{BufRead, Write};
+    let mut err = std::io::stderr();
+    write!(err, "{} [y/N] ", question)?;
+    err.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Message for `tk done`. Says `Completed` only when the card is actually done.
@@ -2420,6 +2478,18 @@ mod tests {
             Some(Commands::Resume { id, .. }) => assert_eq!(id, "1"),
             other => panic!("Expected Resume, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_cli_parse_auto() {
+        match Cli::try_parse_from(["tk", "auto", "1", "2"]).unwrap().command {
+            Some(Commands::Auto { ids, off }) => {
+                assert_eq!(ids, vec!["1", "2"]);
+                assert!(!off);
+            }
+            other => panic!("Expected Auto, got {:?}", other),
+        }
+        assert!(Cli::try_parse_from(["tk", "auto"]).is_err());
     }
 
     #[test]

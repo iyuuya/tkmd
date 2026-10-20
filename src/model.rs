@@ -106,7 +106,11 @@ pub struct TaskFrontmatter {
     /// What the agent submitted for review: the exact output snapshot and the check that passed on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ReviewReceipt>,
-    /// How the final sign-off was given (`interactive`).
+    /// The eval command a human approved for auto-acceptance (`tk auto`). When the task's
+    /// current `eval` equals this and passes on submit, the task closes without a manual sign-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_eval: Option<String>,
+    /// How the final sign-off was given (`interactive` or `auto:eval`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
     pub created: String,
