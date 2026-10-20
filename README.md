@@ -213,6 +213,7 @@ In merged view (`tk -A`), task IDs display distinct scope indicators (`tk-001L` 
 | `tk review 1 -n "All checks green"` | `tk r 1` | Move task to `pending-close` (auto-runs `eval` gate) |
 | `tk done 1 -n "Verified"` | `tk d 1` | Sign off and close task (`status: done` + Daily Note entry in Obsidian mode) |
 | `tk done 1 2 3` / `tk done --pending` | `tk d --pending` | Bulk sign-off: one summary and one confirmation; a task that fails its checks is skipped and reported |
+| `tk auto 1 2` | `tk auto 1 --off` | Approve each task's eval in advance: the task closes itself when the owner submits and that check passes |
 | `tk add p1 Fix auth +app @ken due:tomorrow` | `tk a ...` | Create a task card using `todo.txt` shorthand (`p0`/`p1`/`p2`, `+project`, `sid:<id>`) |
 | `tk claim 1 --owner claude -s 8y9380573586` | `tk c 1` | Claim `tk-001` (`status: in-progress`) and attach agent `session_id` |
 | `tk resume 1` | `tk u 1` | Resume the AI agent session attached to `tk-001` (`claude -r <id>`, `codex resume <id>`, etc.) |

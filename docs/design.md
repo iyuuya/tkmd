@@ -128,12 +128,15 @@ AI agents cannot close tasks directly during autonomous execution. `tkmd` enforc
 Who is calling does not come from the `--actor` name. Approval is decided by how `tk done` runs:
 - **Untrusted callers** (MCP, scripts, and agents whose shell has no terminal): can submit for review, can never mark `done`.
 - **Interactive sign-off**: `tk d <id>` with stdin and stderr attached to a terminal shows the receipt, any warnings (no eval ran, eval changed after claim), and asks for confirmation.
-- An agent can no longer close a task as your proxy. Close it yourself at the terminal.
+- **Auto-accept** (`tk auto <ids>`, terminal only): you approve a task's eval in advance. When the owner submits and that exact eval passes, the task closes as `auto:eval`. Changing the eval revokes the approval. Use it for routine work with a trustworthy check; keep manual sign-off for judgement calls.
+- **Bulk sign-off** (`tk d --pending`): one summary, one confirmation for everything waiting.
+- An agent can no longer close a task as your proxy. Approve the check with `tk auto`, or close it yourself at the terminal.
 - This is a workflow harness, not authentication. An agent runs as your OS user, and one that allocates its own pseudo-terminal can pass the terminal check.
 
 ```toml
 [policy]
-require_eval = true   # no-eval tasks cannot reach pending-close
+require_eval = true        # no-eval tasks cannot reach pending-close
+eval_timeout_secs = 600    # kill a hung eval (and its children); 0 = no limit
 ```
 
 Concurrent agents are serialized with an advisory `flock` per card on Unix. On Windows the lock is a no-op.

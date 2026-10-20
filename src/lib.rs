@@ -1,12 +1,14 @@
 #![allow(clippy::too_many_arguments, clippy::manual_clamp)]
 
 mod analytics;
+mod ansi;
 mod mcp;
 mod model;
 mod store;
 mod todotxt;
 
 use anyhow::Result;
+use ansi::Ansi;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
 use model::{CardScope, TaskCard, TaskStatus};
@@ -17,7 +19,7 @@ fn get_color_choice() -> ColorChoice {
     if std::env::var("NO_COLOR").is_ok() {
         ColorChoice::Never
     } else {
-        ColorChoice::Always
+        ColorChoice::Auto
     }
 }
 
@@ -33,16 +35,16 @@ fn cli_styles() -> Styles {
 }
 
 // ANSI colors tuned to Ken's Starship palette (`ken-custom`)
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const BOLD_WHITE: &str = "\x1b[1;97m";
-const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[38;2;224;108;117m"; // #e06c75
-const ORANGE: &str = "\x1b[38;2;254;128;25m"; // #fe8019
-const AQUA: &str = "\x1b[38;2;86;182;194m"; // #56b6c2
-const BLUE: &str = "\x1b[38;2;74;142;194m"; // #4a8ec2
-const GREEN: &str = "\x1b[38;2;152;195;121m"; // #98c379
-const PURPLE: &str = "\x1b[38;2;198;120;221m"; // #c678dd
+const RESET: Ansi = Ansi("\x1b[0m");
+const BOLD: Ansi = Ansi("\x1b[1m");
+const BOLD_WHITE: Ansi = Ansi("\x1b[1;97m");
+const DIM: Ansi = Ansi("\x1b[2m");
+const RED: Ansi = Ansi("\x1b[38;2;224;108;117m"); // #e06c75
+const ORANGE: Ansi = Ansi("\x1b[38;2;254;128;25m"); // #fe8019
+const AQUA: Ansi = Ansi("\x1b[38;2;86;182;194m"); // #56b6c2
+const BLUE: Ansi = Ansi("\x1b[38;2;74;142;194m"); // #4a8ec2
+const GREEN: Ansi = Ansi("\x1b[38;2;152;195;121m"); // #98c379
+const PURPLE: Ansi = Ansi("\x1b[38;2;198;120;221m"); // #c678dd
 
 #[derive(Parser)]
 #[command(
@@ -166,9 +168,9 @@ enum Commands {
     Review {
         /// Task ID (e.g. 1 or tk-001). If omitted, displays review queue of tasks awaiting sign-off.
         id: Option<String>,
-        /// Who is submitting the task for review
-        #[arg(short, long, default_value = "agent")]
-        actor: String,
+        /// Who is submitting the task for review (default: you at a terminal, `agent` otherwise)
+        #[arg(short, long)]
+        actor: Option<String>,
         /// Summary note or [[wikilink]] to artifact
         #[arg(short, long)]
         note: Option<String>,
@@ -979,6 +981,7 @@ fn print_review_card_summary(c: &TaskCard) {
 }
 
 pub fn run() -> Result<()> {
+    ansi::init_for_stdout();
     let cli = Cli::parse();
 
     if let Some(Commands::Completions { shell, ref bin }) = cli.command {
@@ -1213,6 +1216,9 @@ pub fn run() -> Result<()> {
             session,
         } => {
             if let Some(task_id) = id {
+                let actor = actor.unwrap_or_else(|| {
+                    if is_interactive() { store.config.default_owner.clone() } else { "agent".to_string() }
+                });
                 let card = store.submit_for_review(&task_id, &actor, note.as_deref(), session)?;
                 let sess_info = card
                     .meta

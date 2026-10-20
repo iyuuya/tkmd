@@ -1,3 +1,4 @@
+use crate::ansi::Ansi;
 use crate::model::{TaskCard, TaskStatus};
 use crate::store::TaskStore;
 use anyhow::Result;
@@ -47,15 +48,15 @@ pub struct CpmAnalysis {
     pub schedule: Vec<CpmTaskSchedule>,
 }
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const BOLD_WHITE: &str = "\x1b[1;97m";
-const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[38;2;224;108;117m";
-const ORANGE: &str = "\x1b[38;2;254;128;25m";
-const AQUA: &str = "\x1b[38;2;86;182;194m";
-const GREEN: &str = "\x1b[38;2;152;195;121m";
-const PURPLE: &str = "\x1b[38;2;198;120;221m";
+const RESET: Ansi = Ansi("\x1b[0m");
+const BOLD: Ansi = Ansi("\x1b[1m");
+const BOLD_WHITE: Ansi = Ansi("\x1b[1;97m");
+const DIM: Ansi = Ansi("\x1b[2m");
+const RED: Ansi = Ansi("\x1b[38;2;224;108;117m");
+const ORANGE: Ansi = Ansi("\x1b[38;2;254;128;25m");
+const AQUA: Ansi = Ansi("\x1b[38;2;86;182;194m");
+const GREEN: Ansi = Ansi("\x1b[38;2;152;195;121m");
+const PURPLE: Ansi = Ansi("\x1b[38;2;198;120;221m");
 
 pub fn format_duration_secs(secs: i64) -> String {
     let s = secs.max(0);
@@ -1090,6 +1091,7 @@ pub fn print_json_value<T: serde::Serialize>(val: &T, force_color: bool) -> anyh
     let should_color =
         (std::io::stdout().is_terminal() || force_color) && std::env::var("NO_COLOR").is_err();
     if should_color {
+        crate::ansi::set_enabled(true);
         println!("{}", colorize_json(&json_str));
     } else {
         println!("{}", json_str);

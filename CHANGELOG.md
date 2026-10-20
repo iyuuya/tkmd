@@ -16,9 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Review receipt**: `pending-close` records a git tree snapshot of the work (task cards excluded), the eval command and result, submitter and time. Approval fails if the output or eval changed since.
 - **`[policy]` config**: `require_eval`.
 - **Bulk sign-off**: `tk done 1 2 3` or `tk done --pending` shows one summary and asks once. Tasks that fail their checks are skipped and reported; the rest close.
+- **Auto-accept (`tk auto <ids>`)**: approve a task's eval in advance; when the owner submits and that exact eval passes, the task closes as `approval: auto:eval` and unblocks dependents. Changing the eval revokes it, `tk auto <ids> --off` turns it off, and agents cannot grant it. You approve the check once instead of every outcome.
+- **Eval timeout**: `[policy].eval_timeout_secs` (default 600, `0` = no limit). A timed-out eval fails, and every process it started is killed, so it cannot hold the card lock.
+- **Test suites**: `tests/concurrency.rs` races real `tk` processes (adds, claims, updates, submits, mixed workloads); `tests/scale.rs` (opt-in) times commands on 3,000 cards.
 - Changing `eval` on a `pending-close` task moves it back to `in-progress`; the card records the eval at claim time so the sign-off prompt can show a changed check.
 
+### Fixed
+- Racing `tk add` processes reused task ids; id allocation now runs under a store lock.
+- An unparsable config was silently replaced by defaults (dropping `[policy]`); it is now an error naming the file.
+- Task lookup matched parent directory names, took the first of several matches, and resolved `100` to `tk-1000`. Ids now match exactly; a name fragment must match one card, otherwise the error lists the candidates.
+- Dependency cycles were accepted; `tk dep` now rejects them and shows the cycle.
+- Blocked tasks could be submitted for review, and any agent could submit another agent's claimed work.
+- The unblock cascade re-read every card for each dependent; it now takes one status snapshot.
+- Unreadable cards vanished silently from listings; they are now named on stderr.
+
 ### Changed
+- Colour is off when stdout is not a terminal (agents get plain text); `NO_COLOR` still wins.
+- Card lock files are hidden (`.tk-001-x.lock`). Do not mix this version with older `tk` binaries on one store: they lock different files.
+- `tk r` records you as the submitter when run at a terminal, `agent` otherwise.
 - `tk c`, `tk eval` and `tk d` default their owner/actor to `default_owner` instead of the literal `ken`; `$HOME`/`$USER` fallbacks no longer assume `/Users/ken`.
 - The configured `default_owner` is treated as human everywhere: no invented `<owner> -c` resume command, human colour in listings.
 - `tk r` reports "no eval ran" instead of "eval passed" for tasks without an eval; `tk add` no longer pads the owner name.

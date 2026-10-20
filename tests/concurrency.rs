@@ -281,3 +281,43 @@ fn agents_cannot_turn_on_auto_accept() {
     // Revoking is always allowed.
     sb.ok(&["auto", "1", "--off"]);
 }
+
+// ---- Agent ergonomics: what a non-terminal caller sees ----
+
+#[test]
+fn piped_output_has_no_color_codes() {
+    let sb = Sandbox::new("nocolor");
+    sb.ok(&["add", "p1 plain output"]);
+    for args in [vec!["ls"], vec!["s", "1"], vec!["r"]] {
+        let mut c = sb.cmd(&args);
+        c.env_remove("NO_COLOR");
+        let out = c.output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.contains('\x1b'), "tk {:?} wrote ANSI codes to a pipe:\n{}", args, text);
+    }
+}
+
+#[test]
+fn unreadable_card_is_reported_not_hidden() {
+    let sb = Sandbox::new("corrupt");
+    sb.ok(&["add", "p1 good card"]);
+    std::fs::write(sb.vault().join("tk-002-broken.md"), "---\nid: tk-002\nstatus: [broken\n---\nbody\n").unwrap();
+    let o = sb.tk(&["ls"]);
+    assert!(o.status.success(), "one bad card must not break listing");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("tk-002-broken.md"), "bad card should be named on stderr, got: {}", err);
+}
+
+#[test]
+fn lock_files_are_hidden() {
+    let sb = Sandbox::new("hiddenlock");
+    sb.ok(&["add", "p1 locked"]);
+    sb.ok(&["c", "1", "-o", "claude"]);
+    let visible: Vec<_> = std::fs::read_dir(sb.vault())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".lock") && !n.starts_with('.'))
+        .collect();
+    assert!(visible.is_empty(), "visible lock files: {:?}", visible);
+}

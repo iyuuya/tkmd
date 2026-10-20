@@ -29,8 +29,10 @@ impl CardLock {
         use std::os::unix::io::AsRawFd;
         const LOCK_EX: i32 = 2;
 
+        // Hidden sibling (`.tk-001-x.lock`) so lock files stay out of Obsidian and `ls`.
         let lock_path = if path.is_file() || path.extension().is_some() {
-            path.with_extension("lock")
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("card");
+            path.with_file_name(format!(".{}.lock", stem))
         } else {
             path.join(".lock")
         };
@@ -755,9 +757,12 @@ views:
             if fname.starts_with('.') || fname.eq_ignore_ascii_case("readme.md") {
                 continue;
             }
-            if let Ok(mut card) = Self::read_card(&path) {
-                card.scope = self.scope;
-                cards.push(card);
+            match Self::read_card(&path) {
+                Ok(mut card) => {
+                    card.scope = self.scope;
+                    cards.push(card);
+                }
+                Err(e) => warn_unreadable_card(&path, &e),
             }
         }
         cards.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
@@ -2316,6 +2321,17 @@ pub fn slugify(title: &str) -> String {
     }
     let trimmed = out.trim_matches('-').to_string();
     trimmed.chars().take(45).collect::<String>().trim_end_matches('-').to_string()
+}
+
+/// Report an unreadable card once per process on stderr (never stdout, which MCP uses).
+fn warn_unreadable_card(path: &Path, err: &anyhow::Error) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if seen.lock().map(|mut s| s.insert(path.to_path_buf())).unwrap_or(false) {
+        let name = path.file_name().and_then(|f| f.to_str()).unwrap_or("?");
+        eprintln!("warning: skipped unreadable card {}: {:#}", name, err);
+    }
 }
 
 /// Run a command, killing it and every process it started if it outlives `timeout`.
