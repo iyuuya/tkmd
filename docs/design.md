@@ -119,14 +119,24 @@ AI agents cannot close tasks directly during autonomous execution. `tkmd` enforc
 
 - When an agent finishes work, it runs `tk eval <id>` to execute the card's shell test.
 - If the test returns exit code 0, the agent runs `tk r <id>` (`tk review`). This moves the task to `pending-close`.
-- **Review Guardrail**: If an agent runs `tk d` or calls the MCP `task_complete` tool on an unreviewed task, `tkmd` blocks the action and moves the task to `pending-close`. Even if the agent omits the `--actor` flag, an agent-owned task cannot move directly to `done`.
+- **Review Guardrail**: If an agent runs `tk d` or calls the MCP `task_complete` tool on an unreviewed task, `tkmd` moves the task to `pending-close` instead. If the task is already in `pending-close`, the call fails.
+- **Review Receipt**: `tk r` records a receipt on the card: a git tree hash of the working tree (task cards excluded), the eval command and its result, who submitted, and when. Approval is refused if the output or the eval command changed after the receipt was written. Outside a git repo the snapshot is not recorded and not checked.
+- **Claim Guard**: `tk c` refuses tasks that are `pending-close`, `done` or `archived`, and tasks another owner has `in-progress`. `--force` takes a task over and records the takeover in the log.
 
-#### Human Sign-Off vs. Agent Proxy
+#### Human Sign-Off
 
-`tkmd` enforces a workflow harness, not cryptographic user authentication:
-- **Autonomous Agent Workflows**: An agent working in a loop cannot bypass `pending-close`. It must wait for human sign-off.
-- **Instructed Closure (Agent as Proxy)**: If a human user explicitly tells an agent in chat to close a task that is already in `pending-close`, the agent can execute `tk d <id>` using its shell access. In this case, the agent acts as a proxy for the human.
-- **Physical Human Sign-Off**: For strict verification, the engineer reviews the pending banner and enters `tk d <id>` directly in the terminal.
+Who is calling does not come from the `--actor` name. Approval is decided by how `tk done` runs:
+- **Untrusted callers** (MCP, scripts, and agents whose shell has no terminal): can submit for review, can never mark `done`.
+- **Interactive sign-off**: `tk d <id>` with stdin and stderr attached to a terminal shows the receipt, any warnings (no eval ran, eval changed after claim), and asks for confirmation.
+- An agent can no longer close a task as your proxy. Close it yourself at the terminal.
+- This is a workflow harness, not authentication. An agent runs as your OS user, and one that allocates its own pseudo-terminal can pass the terminal check.
+
+```toml
+[policy]
+require_eval = true   # no-eval tasks cannot reach pending-close
+```
+
+Concurrent agents are serialized with an advisory `flock` per card on Unix. On Windows the lock is a no-op.
 
 
 ### Session Resumption (`tk u <id>`)

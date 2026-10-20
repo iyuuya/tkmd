@@ -11,7 +11,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
 use model::{CardScope, TaskCard, TaskStatus};
 use std::process::Command;
-use store::{ScopeSelection, TaskStore};
+use store::{Approval, ScopeSelection, TaskStore};
 
 fn get_color_choice() -> ColorChoice {
     if std::env::var("NO_COLOR").is_ok() {
@@ -125,12 +125,15 @@ enum Commands {
     Claim {
         /// Task ID (e.g. 1 or tk-001)
         id: String,
-        /// Who is claiming the task (e.g. ken, claude, codex, hermes, pi)
-        #[arg(short, long, default_value = "ken")]
-        owner: String,
+        /// Who is claiming the task (e.g. claude, codex, hermes, pi). Defaults to the configured owner.
+        #[arg(short, long)]
+        owner: Option<String>,
         /// Agent session ID or resume command (e.g. 8y9380573586 or "claude -r 8y9380573586")
         #[arg(short, long)]
         session: Option<String>,
+        /// Take over a task another owner is working on, or pull it back from review (logged)
+        #[arg(long)]
+        force: bool,
     },
     /// Resume or continue an AI agent session attached to a task (e.g. `agy -c`, `agy --conversation <id>`, `claude -r <id>`) (alias: `u`)
     #[command(visible_alias = "u")]
@@ -154,9 +157,9 @@ enum Commands {
     Eval {
         /// Task ID (e.g. 1 or tk-001)
         id: String,
-        /// Who is running the eval
-        #[arg(short, long, default_value = "ken")]
-        actor: String,
+        /// Who is running the eval. Defaults to the configured owner.
+        #[arg(short, long)]
+        actor: Option<String>,
     },
     /// Submit task to pending-close (tk r 1) or view pending sign-off review queue (tk r / tk review)
     #[command(visible_alias = "r", alias = "rev")]
@@ -176,11 +179,16 @@ enum Commands {
     /// Complete a task -> done + Daily Note log (alias: `d`)
     #[command(visible_alias = "d")]
     Done {
-        /// Task ID (e.g. 1 or tk-001)
-        id: String,
-        /// Who completed/approved the task
-        #[arg(short, long, default_value = "ken")]
-        actor: String,
+        /// Task ID(s) (e.g. 1 or tk-001; several: `tk d 1 2 3`)
+        #[arg(required_unless_present = "pending")]
+        ids: Vec<String>,
+        /// Close every task awaiting sign-off (`pending-close`) after one confirmation
+        #[arg(long)]
+        pending: bool,
+        /// Who is asking to close the task (log context only). Approval comes from a person at an
+        /// interactive terminal.
+        #[arg(short, long)]
+        actor: Option<String>,
         /// Optional completion note or [[wikilink]]
         #[arg(short, long)]
         note: Option<String>,
@@ -490,7 +498,7 @@ fn color_status_compact(st: &TaskStatus) -> String {
 fn color_owner(owner: &str, width: usize) -> String {
     let truncated = truncate_str(owner, width.saturating_sub(1));
     let padded = format!("@{:<w$}", truncated, w = width.saturating_sub(1));
-    if owner.eq_ignore_ascii_case("ken") {
+    if model::is_human(owner) {
         format!("{BOLD}{GREEN}{}{RESET}", padded)
     } else {
         format!("{PURPLE}{}{RESET}", padded)
@@ -1006,7 +1014,7 @@ pub fn run() -> Result<()> {
                 "{GREEN}✓ Created{RESET} {BOLD}{}{RESET} [{}] ({}) -> {BOLD}{}{RESET}",
                 card.meta.id,
                 color_priority(&card.meta.priority).trim(),
-                color_owner(&card.meta.owner, 9).trim(),
+                color_owner(&card.meta.owner, card.meta.owner.chars().count() + 1),
                 card.meta.title
             );
         }
@@ -1092,8 +1100,9 @@ pub fn run() -> Result<()> {
             println!("{DIM}File:       {}{RESET}\n", card.path);
             println!("{}", card.body);
         }
-        Commands::Claim { id, owner, session } => {
-            let card = store.claim_task(&id, &owner, session)?;
+        Commands::Claim { id, owner, session, force } => {
+            let owner = owner.unwrap_or_else(|| store.config.default_owner.clone());
+            let card = store.claim_task(&id, &owner, session, force)?;
             let sess_info = card
                 .meta
                 .resume_command()
@@ -1175,6 +1184,7 @@ pub fn run() -> Result<()> {
             }
         }
         Commands::Eval { id, actor } => {
+            let actor = actor.unwrap_or_else(|| store.config.default_owner.clone());
             let (card, passed, output) = store.run_eval(&id, &actor)?;
             if passed {
                 println!("{GREEN}✅ Eval PASSED{RESET} for {BOLD}{}{RESET}: {}", card.meta.id, output);
@@ -1196,20 +1206,45 @@ pub fn run() -> Result<()> {
                     .resume_command()
                     .map(|cmd| format!(" [resume: `{cmd}`]"))
                     .unwrap_or_default();
+                let eval_note = match card.meta.receipt.as_ref().map(|r| r.eval_result.as_str()) {
+                    Some("no-eval") => format!("{ORANGE}no eval ran{RESET}"),
+                    _ => "eval passed".to_string(),
+                };
                 println!(
-                    "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` (eval passed){}: {}",
-                    card.meta.id, sess_info, card.meta.title
+                    "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` ({}){}: {}",
+                    card.meta.id, eval_note, sess_info, card.meta.title
                 );
             } else {
                 print_review_dashboard(&store)?;
             }
         }
-        Commands::Done { id, actor, note } => {
-            let card = store.complete_task(&id, &actor, note.as_deref())?;
-            println!(
-                "{}",
-                done_message(&card.meta.status, &card.meta.id, &card.meta.title)
-            );
+        Commands::Done {
+            ids,
+            pending,
+            actor,
+            note,
+        } => {
+            let actor = actor.unwrap_or_else(|| store.config.default_owner.clone());
+            let cards = done_targets(&store, &ids, pending)?;
+            if cards.is_empty() {
+                println!("{GREEN}  ✨ No tasks awaiting sign-off.{RESET}");
+                return Ok(());
+            }
+            let approval = cli_approval(&store, &cards)?;
+            let mut failed = 0;
+            for card in &cards {
+                match store.complete_task_with(&card.meta.id, &actor, note.as_deref(), approval) {
+                    Ok(c) => println!("{}", done_message(&c.meta.status, &c.meta.id, &c.meta.title)),
+                    Err(e) if cards.len() > 1 => {
+                        failed += 1;
+                        eprintln!("{RED}✖ Skipped{RESET} {BOLD}{}{RESET}: {}", card.meta.id, e);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!("{} of {} task(s) not closed", failed, cards.len());
+            }
         }
         Commands::Edit { id } => {
             let card = store.find_task(&id)?;
@@ -2180,6 +2215,99 @@ fn render_dependency_tree(store: &TaskStore, target_id: Option<&str>, project: O
     Ok(())
 }
 
+/// Resolve `tk done` targets: the given ids, or every `pending-close` task with `--pending`.
+/// With `--pending`, a global card whose id also exists locally is skipped, because `find_task`
+/// would resolve that id to the local card.
+fn done_targets(store: &TaskStore, ids: &[String], pending: bool) -> Result<Vec<TaskCard>> {
+    let mut cards = Vec::new();
+    for id in ids {
+        cards.push(store.find_task(id)?);
+    }
+    if pending {
+        let local = store.list_store_cards()?;
+        let local_ids: Vec<String> = local.iter().map(|c| c.meta.id.to_lowercase()).collect();
+        let mut candidates = local;
+        if matches!(store.active_scope, ScopeSelection::Auto | ScopeSelection::All)
+            && let Some(peer) = store.peer.as_ref()
+        {
+            candidates.extend(
+                peer.list_store_cards()?
+                    .into_iter()
+                    .filter(|c| !local_ids.contains(&c.meta.id.to_lowercase())),
+            );
+        }
+        for c in candidates {
+            if c.meta.status == TaskStatus::PendingClose && !cards.iter().any(|x| x.path == c.path) {
+                cards.push(c);
+            }
+        }
+    }
+    Ok(cards)
+}
+
+/// Decide how `tk done` may approve. A person must be at an interactive terminal (stdin and
+/// stderr are TTYs); agents, pipes and scripts get `Untrusted`, which can only submit for review.
+/// Several tasks are summarised together and confirmed with one answer.
+/// Limitation: an agent that allocates its own pseudo-terminal passes the TTY check. This is a
+/// workflow harness, not authentication.
+fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Ok(Approval::Untrusted);
+    }
+    // Only cards that would actually close need sign-off; agent-owned work is routed to review.
+    let closing: Vec<&TaskCard> = cards
+        .iter()
+        .filter(|c| {
+            c.meta.status == TaskStatus::PendingClose
+                || c.meta.owner.eq_ignore_ascii_case(&store.config.default_owner)
+        })
+        .collect();
+    if closing.is_empty() {
+        return Ok(Approval::Interactive);
+    }
+
+    let mut err = std::io::stderr();
+    writeln!(err, "{BOLD}Sign-off ({} task(s)):{RESET}", closing.len())?;
+    for card in &closing {
+        writeln!(err, "  {BOLD}{}{RESET} {} (@{}, {})", card.meta.id, card.meta.title, card.meta.owner, card.meta.status.as_str())?;
+        if let Some(r) = &card.meta.receipt {
+            writeln!(
+                err,
+                "      submitted by {} at {}; eval: {}; snapshot: {}",
+                r.submitted_by,
+                r.submitted_at,
+                r.eval.as_deref().unwrap_or("none"),
+                r.snapshot.as_deref().map(|s| &s[..s.len().min(12)]).unwrap_or("not checked (not a git repo)")
+            )?;
+            if r.eval_result == "no-eval" {
+                writeln!(err, "      {ORANGE}warning:{RESET} no automated check ran")?;
+            }
+        }
+        if card.meta.receipt.is_some() && card.meta.claimed_eval != card.meta.eval {
+            writeln!(
+                err,
+                "      {ORANGE}warning:{RESET} eval changed after claim: `{}` -> `{}`",
+                card.meta.claimed_eval.as_deref().unwrap_or("none"),
+                card.meta.eval.as_deref().unwrap_or("none")
+            )?;
+        }
+    }
+    let target = if closing.len() == 1 {
+        closing[0].meta.id.clone()
+    } else {
+        format!("all {}", closing.len())
+    };
+    write!(err, "Approve and close {}? [y/N] ", target)?;
+    err.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+        anyhow::bail!("Not approved: nothing closed");
+    }
+    Ok(Approval::Interactive)
+}
+
 /// Message for `tk done`. Says `Completed` only when the card is actually done.
 /// Agent completions stop at `pending-close` and wait for human sign-off.
 fn done_message(status: &TaskStatus, id: &str, title: &str) -> String {
@@ -2190,7 +2318,7 @@ fn done_message(status: &TaskStatus, id: &str, title: &str) -> String {
         )
     } else {
         format!(
-            "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` (eval passed): {}. Human sign-off is next.",
+            "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close`: {}. Human sign-off is next.",
             id, title
         )
     }
@@ -2278,10 +2406,11 @@ mod tests {
     fn test_cli_parse_claim_and_resume() {
         let cli_claim = Cli::try_parse_from(["tk", "c", "1", "--owner", "claude", "-s", "claude -r 999"]).unwrap();
         match cli_claim.command {
-            Some(Commands::Claim { id, owner, session }) => {
+            Some(Commands::Claim { id, owner, session, force }) => {
                 assert_eq!(id, "1");
-                assert_eq!(owner, "claude");
+                assert_eq!(owner.as_deref(), Some("claude"));
                 assert_eq!(session.as_deref(), Some("claude -r 999"));
+                assert!(!force);
             }
             other => panic!("Expected Claim, got {:?}", other),
         }
@@ -2291,6 +2420,25 @@ mod tests {
             Some(Commands::Resume { id, .. }) => assert_eq!(id, "1"),
             other => panic!("Expected Resume, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_cli_parse_bulk_done() {
+        match Cli::try_parse_from(["tk", "d", "1", "2", "tk-003"]).unwrap().command {
+            Some(Commands::Done { ids, pending, .. }) => {
+                assert_eq!(ids, vec!["1", "2", "tk-003"]);
+                assert!(!pending);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+        match Cli::try_parse_from(["tk", "d", "--pending"]).unwrap().command {
+            Some(Commands::Done { ids, pending, .. }) => {
+                assert!(ids.is_empty());
+                assert!(pending);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+        assert!(Cli::try_parse_from(["tk", "d"]).is_err());
     }
 
     #[test]

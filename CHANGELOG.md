@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Card locks now hold**: `CardLock` kept only the raw fd and dropped the `File`, which closed the descriptor and released the `flock` immediately. The lock now lives until dropped. `eval`, submit, done, the unblock cascade and `tk dep` hold the card lock for the whole read, eval and write.
+- **Sign-off no longer trusts the `--actor` name**: `tk done` defaulted `--actor` to `ken` and the engine compared that string with `default_owner`, so any caller could close a task by naming the owner. Approval now depends on how `tk done` runs: MCP and non-interactive callers can only submit for review, and interactive `tk done` shows the receipt and asks for confirmation.
+- **Claim guard**: `tk c` refuses `pending-close`, `done` and `archived` tasks and tasks another owner has in progress, unless `--force` (logged as `claimed-forced`).
+
+### Added
+- **Review receipt**: `pending-close` records a git tree snapshot of the work (task cards excluded), the eval command and result, submitter and time. Approval fails if the output or eval changed since.
+- **`[policy]` config**: `require_eval`.
+- **Bulk sign-off**: `tk done 1 2 3` or `tk done --pending` shows one summary and asks once. Tasks that fail their checks are skipped and reported; the rest close.
+- Changing `eval` on a `pending-close` task moves it back to `in-progress`; the card records the eval at claim time so the sign-off prompt can show a changed check.
+
+### Changed
+- `tk c`, `tk eval` and `tk d` default their owner/actor to `default_owner` instead of the literal `ken`; `$HOME`/`$USER` fallbacks no longer assume `/Users/ken`.
+- The configured `default_owner` is treated as human everywhere: no invented `<owner> -c` resume command, human colour in listings.
+- `tk r` reports "no eval ran" instead of "eval passed" for tasks without an eval; `tk add` no longer pads the owner name.
+- An agent can no longer close a task as the human's proxy.
+- Tasks in `pending-close` from before this release have no receipt: re-submit them with `tk r <id>` before approving.
+
 ## [0.1.2] - 2026-10-20
 
 ### Added

@@ -34,7 +34,9 @@ All active tasks live as atomic Markdown cards in `tasks/tk-XXX-*.md` (and rende
    ```
 5. **Submit for Sign-Off (`status: pending-close`)**:
    - **CRITICAL RULE**: AI agents **MUST NOT** mark tasks as `done` (`tk d`). Agents **MUST** submit finished work to `pending-close` using `tk r` (`tk review`) once `tk eval` passes.
-   - Even if an agent calls `tk d --actor <agent>` or MCP `task_complete`, `tk`'s built-in guardrail hook automatically intercepts non-human actors and routes the task to `pending-close`.
+   - `tk d` and MCP `task_complete` from an agent route the task to `pending-close`; on a task already in `pending-close` they fail. Passing `--actor <owner>` does not change this: sign-off needs a person at a terminal.
+   - Do not claim a task another owner is working on. `tk c` refuses it; use `--force` only when the human asks you to take it over.
+   - Do not change a task's `eval` to make it pass. Changing `eval` invalidates the review and the human sees the change.
    ```bash
    tk r 1 -a <agent-name> -s "<session-id>" -n "Summary of changes and [[artifact-wikilink]]"
    ```

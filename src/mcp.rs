@@ -106,13 +106,14 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
                         },
                         {
                             "name": "task_claim",
-                            "description": "Claim a task, attach your agent session_id for easy resume, and transition status to in-progress.",
+                            "description": "Claim a task, attach your agent session_id for easy resume, and transition status to in-progress. Refuses tasks another owner is working on, tasks under review, and closed tasks unless force is true.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
                                     "owner": { "type": "string", "description": "Agent or human claiming the task (e.g. claude, codex, hermes, pi)" },
-                                    "session_id": { "type": "string", "description": "Agent session ID or resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" }
+                                    "session_id": { "type": "string", "description": "Agent session ID or resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" },
+                                    "force": { "type": "boolean", "description": "Take over a task another owner is working on, or pull it back from review. Recorded in the log." }
                                 },
                                 "required": ["id", "owner"]
                             }
@@ -145,7 +146,7 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
                         },
                         {
                             "name": "task_complete",
-                            "description": "Verify eval passes, mark task as done, and log completion to today's Obsidian Daily Note.",
+                            "description": "Finish your work on a task. Agents cannot mark tasks done: this runs eval and submits to pending-close for human sign-off. It fails if the task is already awaiting sign-off.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -267,7 +268,8 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let card = store.claim_task(id, owner, session_id)?;
+            let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+            let card = store.claim_task(id, owner, session_id, force)?;
             Ok(serde_json::to_string_pretty(&card)?)
         }
         "task_eval" => {
@@ -338,6 +340,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: crate::store::Policy::default(),
         };
 
         let store = TaskStore {
@@ -401,15 +404,15 @@ mod tests {
         let reviewed: Value = serde_json::from_str(&rev_res).unwrap();
         assert_eq!(reviewed["status"], "pending-close");
 
-        // 5. Complete task via MCP
+        // 5. MCP cannot sign off, even when it claims to be the owner
         let comp_args = json!({
             "id": "1",
             "actor": "ken",
             "note": "Signed off"
         });
-        let comp_res = handle_tool_call(&store, "task_complete", &comp_args).expect("task_complete failed");
-        let completed: Value = serde_json::from_str(&comp_res).unwrap();
-        assert_eq!(completed["status"], "done");
+        let comp_err = handle_tool_call(&store, "task_complete", &comp_args).unwrap_err();
+        assert!(comp_err.to_string().contains("awaiting human sign-off"));
+        assert_eq!(store.find_task("1").unwrap().meta.status, crate::model::TaskStatus::PendingClose);
 
         // 6. CPM calculation via MCP
         let cpm_res = handle_tool_call(&store, "task_cpm", &json!({})).expect("task_cpm failed");

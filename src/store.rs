@@ -1,5 +1,6 @@
 use crate::model::{
-    CardScope, TaskCard, TaskEvent, TaskFrontmatter, TaskStatus, agent_continue_cmd, agent_resume_cmd,
+    CardScope, ReviewReceipt, TaskCard, TaskEvent, TaskFrontmatter, TaskStatus, agent_continue_cmd,
+    agent_resume_cmd, is_human, set_human_owner,
 };
 use crate::todotxt::parse_todotxt;
 use anyhow::{Context, Result, bail};
@@ -15,9 +16,11 @@ unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
 }
 
+/// Advisory exclusive lock on a card. The lock lives as long as this value: the `File`
+/// must stay open, because closing the descriptor releases the `flock`.
 #[cfg(unix)]
 pub struct CardLock {
-    fd: std::os::unix::io::RawFd,
+    file: std::fs::File,
 }
 
 #[cfg(unix)]
@@ -40,23 +43,24 @@ impl CardLock {
             .open(&lock_path)
             .with_context(|| format!("Failed to open lock file {:?}", lock_path))?;
 
-        let fd = file.as_raw_fd();
-        let rc = unsafe { flock(fd, LOCK_EX) };
+        let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX) };
         if rc != 0 {
             bail!("Failed to acquire exclusive lock on {:?}", lock_path);
         }
-        Ok(Self { fd })
+        Ok(Self { file })
     }
 }
 
 #[cfg(unix)]
 impl Drop for CardLock {
     fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
         const LOCK_UN: i32 = 8;
-        unsafe { flock(self.fd, LOCK_UN) };
+        unsafe { flock(self.file.as_raw_fd(), LOCK_UN) };
     }
 }
 
+/// No-op on non-Unix platforms: concurrent agents are NOT serialized on Windows.
 #[cfg(not(unix))]
 pub struct CardLock;
 
@@ -238,12 +242,34 @@ pub struct AppConfig {
     /// Preferred editor for `tk e` and CLI-mode `tk o` (e.g., "hx", "nvim", "zed", "code", "vim")
     #[serde(default)]
     pub editor: Option<String>,
+    /// Lifecycle guardrails (`[policy]` table). Must stay the last field: TOML tables follow values.
+    #[serde(default)]
+    pub policy: Policy,
+}
+
+/// `[policy]` guardrails for the submit -> review -> accept lifecycle.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Policy {
+    /// Refuse `pending-close` for tasks with no `eval` command (instead of auto-passing as `no-eval`).
+    #[serde(default)]
+    pub require_eval: bool,
+}
+
+/// How a caller asks to close a task. Only the CLI, after checking for a human at a
+/// terminal, constructs `Interactive`; MCP and scripts always pass `Untrusted`.
+/// This is a workflow harness, not authentication: an agent that fakes a terminal passes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    /// Agents, MCP and any non-interactive caller: can submit for review, can never mark done.
+    Untrusted,
+    /// A human confirmed at an interactive terminal.
+    Interactive,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/ken".to_string());
-        let user = std::env::var("USER").unwrap_or_else(|_| "ken".to_string());
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let user = std::env::var("USER").unwrap_or_else(|_| "owner".to_string());
         let editor = Some(detect_editor());
 
         if let Some(vault) = detect_obsidian_vault() {
@@ -265,6 +291,7 @@ impl Default for AppConfig {
                 default_owner: user,
                 obsidian_vault_name: vault_name,
                 editor,
+                policy: Policy::default(),
             }
         } else {
             Self {
@@ -276,6 +303,7 @@ impl Default for AppConfig {
                 default_owner: user,
                 obsidian_vault_name: None,
                 editor,
+                policy: Policy::default(),
             }
         }
     }
@@ -323,13 +351,14 @@ impl TaskStore {
         };
 
         let mut config = config;
+        set_human_owner(&config.default_owner);
         // Check for runtime environment variable override (TASKMD_DIR or TASKMD_PATH)
         if let Ok(env_path) = std::env::var("TASKMD_DIR").or_else(|_| std::env::var("TASKMD_PATH")) {
             config.vault_path = env_path;
             config.tasks_dir = String::new();
         }
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/ken".to_string());
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let expanded_vault = if config.vault_path.starts_with("~/") {
             format!("{}/{}", home, &config.vault_path[2..])
         } else {
@@ -362,7 +391,7 @@ impl TaskStore {
     }
 
     pub fn load_local_store(root: &Path) -> Result<Self> {
-        let user = std::env::var("USER").unwrap_or_else(|_| "ken".to_string());
+        let user = std::env::var("USER").unwrap_or_else(|_| "owner".to_string());
         let cfg_file = if root.join(".tkmd.toml").is_file() {
             Some(root.join(".tkmd.toml"))
         } else if root.join("tkmd.toml").is_file() {
@@ -391,6 +420,7 @@ impl TaskStore {
                 default_owner: user,
                 obsidian_vault_name: None,
                 editor: Some(detect_editor()),
+                policy: Policy::default(),
             })
         } else {
             AppConfig {
@@ -402,9 +432,11 @@ impl TaskStore {
                 default_owner: user,
                 obsidian_vault_name: None,
                 editor: Some(detect_editor()),
+                policy: Policy::default(),
             }
         };
 
+        set_human_owner(&config.default_owner);
         let root_path = PathBuf::from(&config.vault_path);
         let tasks_path = if config.tasks_dir.is_empty() {
             root_path.clone()
@@ -685,6 +717,7 @@ views:
             default_owner: owner.to_string(),
             obsidian_vault_name: vault_name,
             editor: editor.or_else(|| Some(detect_editor())),
+            policy: Policy::default(),
         };
 
         let cfg_path = if is_local {
@@ -793,7 +826,7 @@ views:
         }
 
         // Determine which agent CLI owns this session
-        let agent = if !matches!(clean_actor.as_str(), "ken" | "human" | "user" | "agent" | "") {
+        let agent = if !is_human(&clean_actor) && clean_actor != "agent" {
             clean_actor
         } else if let Some(s) = clean_sid
             && let Some(first_word) = s.split_whitespace().next()
@@ -803,10 +836,7 @@ views:
             )
         {
             first_word.to_lowercase()
-        } else if !matches!(
-            card.meta.owner.to_lowercase().as_str(),
-            "ken" | "human" | "user" | "agent" | ""
-        ) {
+        } else if !is_human(&card.meta.owner) && !card.meta.owner.eq_ignore_ascii_case("agent") {
             card.meta.owner.to_lowercase()
         } else {
             return;
@@ -1010,6 +1040,9 @@ views:
             dod: dod.clone(),
             eval: eval.clone(),
             eval_status,
+            claimed_eval: None,
+            receipt: None,
+            approval: None,
             created: today.clone(),
             updated: today,
             _organized: true,
@@ -1084,20 +1117,45 @@ views:
         bail!("Task '{}' not found", query)
     }
 
+    /// Claim a task -> `in-progress`.
+    /// Refuses tasks under review or closed, and tasks another owner is working on, unless `force`.
     pub fn claim_task(
         &self,
         query: &str,
         owner: &str,
         session_id: Option<String>,
+        force: bool,
     ) -> Result<TaskCard> {
-        let mut card = self.find_task(query)?;
-        let _lock = Self::lock_card(Path::new(&card.path))?;
-        let orig_scope = card.scope;
-        card = Self::read_card(Path::new(&card.path))?;
-        card.scope = orig_scope;
+        let found = self.find_task(query)?;
+        let _lock = Self::lock_card(Path::new(&found.path))?;
+        let mut card = Self::read_card(Path::new(&found.path))?;
+        card.scope = found.scope;
         let prev = card.meta.status.as_str().to_string();
         let today = Local::now().format("%Y-%m-%d").to_string();
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
+        let new_owner = owner.trim().trim_start_matches('@').to_lowercase();
+
+        match card.meta.status {
+            TaskStatus::Done | TaskStatus::Archived => {
+                bail!("Cannot claim {}: it is already `{}`", card.meta.id, prev);
+            }
+            TaskStatus::PendingClose if !force => {
+                bail!(
+                    "Cannot claim {}: it is awaiting sign-off (`pending-close`). Use --force to take it back into work",
+                    card.meta.id
+                );
+            }
+            TaskStatus::InProgress
+                if !force && !card.meta.owner.eq_ignore_ascii_case(&new_owner) =>
+            {
+                bail!(
+                    "Cannot claim {}: `{}` is working on it. Use --force to take it over",
+                    card.meta.id,
+                    card.meta.owner
+                );
+            }
+            _ => {}
+        }
 
         // Check if task is blocked by incomplete tasks
         if !card.meta.blocked_by.is_empty() {
@@ -1124,8 +1182,16 @@ views:
             }
         }
 
+        let takeover = if force && !card.meta.owner.eq_ignore_ascii_case(&new_owner) {
+            format!(" (forced takeover from `{}`, was `{}`)", card.meta.owner, prev)
+        } else {
+            String::new()
+        };
         card.meta.status = TaskStatus::InProgress;
-        card.meta.owner = owner.to_lowercase();
+        card.meta.owner = new_owner;
+        // A new claim starts a new attempt: any earlier review receipt no longer applies.
+        card.meta.receipt = None;
+        card.meta.claimed_eval = card.meta.eval.clone();
         let resolved_sid = session_id
             .filter(|s| !s.trim().is_empty())
             .or_else(Self::detect_env_session_id);
@@ -1137,10 +1203,11 @@ views:
             .map(|cmd| format!(" — resume: `{}`", cmd))
             .unwrap_or_default();
         card.body = format!(
-            "{}\n- `{}`: Claimed by `{}` (`in-progress`){}.",
+            "{}\n- `{}`: Claimed by `{}` (`in-progress`){}{}.",
             card.body.trim_end(),
             now_ts,
             owner,
+            takeover,
             session_note
         );
 
@@ -1148,7 +1215,7 @@ views:
         self.write_card(&card)?;
         self.log_event(
             &card.meta.id,
-            "claimed",
+            if takeover.is_empty() { "claimed" } else { "claimed-forced" },
             owner,
             card.meta.session_id.as_deref(),
             Some(&prev),
@@ -1161,14 +1228,33 @@ views:
 
     /// Runs the task's `eval` shell command (if configured) and records pass/fail on the card.
     pub fn run_eval(&self, query: &str, actor: &str) -> Result<(TaskCard, bool, String)> {
-        let mut card = self.find_task(query)?;
+        let found = self.find_task(query)?;
+        let _lock = Self::lock_card(Path::new(&found.path))?;
+        let mut card = Self::read_card(Path::new(&found.path))?;
+        card.scope = found.scope;
+        let (passed, output) = self.eval_card(&mut card, actor)?;
+        self.write_card(&card)?;
+        let cur_status = card.meta.status.as_str().to_string();
+        self.log_event(
+            &card.meta.id,
+            "eval",
+            actor,
+            card.meta.session_id.as_deref(),
+            Some(&cur_status),
+            &cur_status,
+            Some(passed),
+            &card.meta.title,
+        )?;
+        Ok((card, passed, output))
+    }
+
+    /// Evaluate a card the caller has already locked and re-read. Mutates the card; does not write it.
+    fn eval_card(&self, card: &mut TaskCard, actor: &str) -> Result<(bool, String)> {
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
-        let today = Local::now().format("%Y-%m-%d").to_string();
 
         let Some(cmd_str) = card.meta.eval.clone() else {
             card.meta.eval_status = Some("passed (no-eval)".to_string());
-            self.write_card(&card)?;
-            return Ok((card, true, "No eval command configured (auto-pass)".to_string()));
+            return Ok((true, "No eval command configured (auto-pass)".to_string()));
         };
 
         #[cfg(target_os = "windows")]
@@ -1219,7 +1305,7 @@ views:
         } else {
             "failed".to_string()
         });
-        card.meta.updated = today;
+        card.meta.updated = Local::now().format("%Y-%m-%d").to_string();
         let badge = if passed { "PASS ✅" } else { "FAIL ❌" };
         card.body = format!(
             "{}\n- `{}`: Eval `{}` run by `{}` -> **{}** (`{}`).",
@@ -1230,23 +1316,11 @@ views:
             badge,
             combined.lines().next().unwrap_or("")
         );
-
-        let cur_status = card.meta.status.as_str().to_string();
-        self.write_card(&card)?;
-        self.log_event(
-            &card.meta.id,
-            "eval",
-            actor,
-            card.meta.session_id.as_deref(),
-            Some(&cur_status),
-            &cur_status,
-            Some(passed),
-            &card.meta.title,
-        )?;
-        Ok((card, passed, combined))
+        Ok((passed, combined))
     }
 
-    /// Submits a task to `pending-close` (runs `eval` first; if `eval` fails, blocks transition!).
+    /// Submits a task to `pending-close`. Runs `eval` under the card lock; a failing eval blocks
+    /// the transition. Records a `ReviewReceipt` binding the pass to the exact output snapshot.
     pub fn submit_for_review(
         &self,
         query: &str,
@@ -1254,8 +1328,36 @@ views:
         note: Option<&str>,
         session_id: Option<String>,
     ) -> Result<TaskCard> {
-        let (mut card, passed, eval_out) = self.run_eval(query, actor)?;
+        let found = self.find_task(query)?;
+        let _lock = Self::lock_card(Path::new(&found.path))?;
+        let mut card = Self::read_card(Path::new(&found.path))?;
+        card.scope = found.scope;
+
+        if matches!(card.meta.status, TaskStatus::Done | TaskStatus::Archived) {
+            bail!("Cannot submit {}: it is already `{}`", card.meta.id, card.meta.status.as_str());
+        }
+        if self.config.policy.require_eval && card.meta.eval.is_none() {
+            bail!(
+                "Cannot submit {}: [policy].require_eval is on and the task has no eval command. Add one with `tk set {} --eval '<cmd>'`",
+                card.meta.id,
+                card.meta.id
+            );
+        }
+
+        let prev = card.meta.status.as_str().to_string();
+        let (passed, eval_out) = self.eval_card(&mut card, actor)?;
         if !passed {
+            self.write_card(&card)?;
+            self.log_event(
+                &card.meta.id,
+                "eval",
+                actor,
+                card.meta.session_id.as_deref(),
+                Some(&prev),
+                &prev,
+                Some(false),
+                &card.meta.title,
+            )?;
             bail!(
                 "Eval failed for {}! Fix before moving to pending-close. Output: {}",
                 card.meta.id,
@@ -1263,20 +1365,20 @@ views:
             );
         }
 
-        let _lock = Self::lock_card(Path::new(&card.path))?;
-        let orig_scope = card.scope;
-        card = Self::read_card(Path::new(&card.path))?;
-        card.scope = orig_scope;
-        let prev = card.meta.status.as_str().to_string();
-        let today = Local::now().format("%Y-%m-%d").to_string();
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
-
         let resolved_sid = session_id
             .filter(|s| !s.trim().is_empty())
             .or_else(Self::detect_env_session_id);
         Self::record_session_on_card(&mut card, actor, resolved_sid.as_deref());
+        card.meta.receipt = Some(ReviewReceipt {
+            snapshot: self.worktree_snapshot(),
+            eval: card.meta.eval.clone(),
+            eval_result: if card.meta.eval.is_some() { "passed" } else { "no-eval" }.to_string(),
+            submitted_by: actor.to_string(),
+            submitted_at: Local::now().to_rfc3339(),
+        });
         card.meta.status = TaskStatus::PendingClose;
-        card.meta.updated = today;
+        card.meta.updated = Local::now().format("%Y-%m-%d").to_string();
         let suffix = match note {
             Some(n) if !n.trim().is_empty() => format!(" — {}", n.trim()),
             _ => String::new(),
@@ -1310,24 +1412,88 @@ views:
         Ok(card)
     }
 
-    /// Completes a task (`status: done`).
-    /// Built-in Guardrail Hook: if `actor` is an AI agent (not `default_owner`), automatically
-    /// redirects to `pending-close` so agents can never bypass human sign-off!
+    /// Completes a task as an untrusted caller (agents, MCP, scripts).
+    /// Built-in guardrail: this can only ever submit for review, never mark `done`.
     pub fn complete_task(&self, query: &str, actor: &str, note: Option<&str>) -> Result<TaskCard> {
+        self.complete_task_with(query, actor, note, Approval::Untrusted)
+    }
+
+    /// Completes a task (`status: done`) when `approval` is a human sign-off.
+    /// `Untrusted` callers are redirected to `pending-close`, and refused if the task is already there.
+    /// Approving `pending-close` work requires the review receipt to still match the output.
+    pub fn complete_task_with(
+        &self,
+        query: &str,
+        actor: &str,
+        note: Option<&str>,
+        approval: Approval,
+    ) -> Result<TaskCard> {
         let card_check = self.find_task(query)?;
-        if !actor.eq_ignore_ascii_case(&self.config.default_owner) {
+        let owner = self.config.default_owner.clone();
+
+        if approval == Approval::Untrusted {
+            if card_check.meta.status == TaskStatus::PendingClose {
+                bail!(
+                    "{} is awaiting human sign-off. Only `tk done {}` run by a person at an interactive terminal can close it",
+                    card_check.meta.id,
+                    card_check.meta.id
+                );
+            }
             return self.submit_for_review(query, actor, note, None);
         }
 
-        // If task is owned by an agent and not yet submitted for review, route to pending-close
-        if !card_check.meta.owner.eq_ignore_ascii_case(&self.config.default_owner)
+        // Agent-owned work goes through review first, even when a human closes it.
+        if !card_check.meta.owner.eq_ignore_ascii_case(&owner)
             && card_check.meta.status != TaskStatus::PendingClose
         {
             return self.submit_for_review(query, &card_check.meta.owner, note, None);
         }
 
-        let (mut card, passed, eval_out) = self.run_eval(query, actor)?;
+        let lock = Self::lock_card(Path::new(&card_check.path))?;
+        let mut card = Self::read_card(Path::new(&card_check.path))?;
+        card.scope = card_check.scope;
+        let prev = card.meta.status.as_str().to_string();
+
+        match card.meta.status {
+            TaskStatus::Done | TaskStatus::Archived => {
+                bail!("{} is already `{}`", card.meta.id, prev);
+            }
+            TaskStatus::PendingClose => {
+                let receipt = card.meta.receipt.clone().with_context(|| {
+                    format!(
+                        "{} has no review receipt (submitted before receipts existed). Re-submit with `tk review {}`",
+                        card.meta.id, card.meta.id
+                    )
+                })?;
+                if receipt.eval != card.meta.eval {
+                    bail!(
+                        "Cannot approve {}: the eval command changed after it was submitted. Re-submit with `tk review {}`",
+                        card.meta.id,
+                        card.meta.id
+                    );
+                }
+                if receipt.snapshot.is_some() && self.worktree_snapshot() != receipt.snapshot {
+                    bail!(
+                        "Cannot approve {}: the output changed since the eval passed (receipt {}). Re-submit with `tk review {}`",
+                        card.meta.id,
+                        receipt.snapshot.as_deref().unwrap_or("none"),
+                        card.meta.id
+                    );
+                }
+            }
+            _ => {
+                if self.config.policy.require_eval && card.meta.eval.is_none() {
+                    bail!(
+                        "Cannot close {}: [policy].require_eval is on and the task has no eval command",
+                        card.meta.id
+                    );
+                }
+            }
+        }
+
+        let (passed, eval_out) = self.eval_card(&mut card, &owner)?;
         if !passed {
+            self.write_card(&card)?;
             bail!(
                 "Cannot mark {} as done — Automated Eval FAILED: {}",
                 card.meta.id,
@@ -1335,27 +1501,31 @@ views:
             );
         }
 
-        let _lock = Self::lock_card(Path::new(&card.path))?;
-        let orig_scope = card.scope;
-        card = Self::read_card(Path::new(&card.path))?;
-        card.scope = orig_scope;
-        let prev = card.meta.status.as_str().to_string();
         let today = Local::now().format("%Y-%m-%d").to_string();
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
+        let approval_label = "interactive".to_string();
 
         card.meta.status = TaskStatus::Done;
         card.meta.updated = today.clone();
+        card.meta.approval = Some(approval_label.clone());
         // Check off DoD items in body when completed
         card.body = card.body.replace("- [ ] ", "- [x] ");
         let summary_suffix = match note {
             Some(n) if !n.trim().is_empty() => format!(" — {}", n.trim()),
             _ => String::new(),
         };
+        let via = if actor.eq_ignore_ascii_case(&owner) {
+            String::new()
+        } else {
+            format!(" (requested as `{}`)", actor)
+        };
         card.body = format!(
-            "{}\n- `{}`: Completed (`done`) by `{}` ✅{}.",
+            "{}\n- `{}`: Completed (`done`) by `{}`, approval `{}`{} ✅{}.",
             card.body.trim_end(),
             now_ts,
-            actor,
+            owner,
+            approval_label,
+            via,
             summary_suffix
         );
 
@@ -1363,7 +1533,7 @@ views:
         self.log_event(
             &card.meta.id,
             "completed",
-            actor,
+            &owner,
             card.meta.session_id.as_deref(),
             Some(&prev),
             "done",
@@ -1371,16 +1541,34 @@ views:
             &card.meta.title,
         )?;
         self.log_to_daily_note(&card, note)?;
+        drop(lock);
 
-        // Auto-unblock cascade: check all tasks blocked by this task
-        let all_cards = self.list_all()?;
-        for mut other in all_cards {
-            if other.meta.blocked_by.iter().any(|b| b.eq_ignore_ascii_case(&card.meta.id))
-                && other.meta.status == TaskStatus::Blocked
-            {
-                // Check if all its blockers are now done
-                let remaining_blockers = other.meta.blocked_by.iter().filter(|bid| {
-                    if bid.eq_ignore_ascii_case(&card.meta.id) {
+        self.cascade_unblock(&card.meta.id, &today, &now_ts)?;
+        Ok(card)
+    }
+
+    /// Promote `blocked` tasks whose blockers are now all closed. Locks each card it rewrites.
+    fn cascade_unblock(&self, completed_id: &str, today: &str, now_ts: &str) -> Result<()> {
+        for other in self.list_all()? {
+            if !other.meta.blocked_by.iter().any(|b| b.eq_ignore_ascii_case(completed_id)) {
+                continue;
+            }
+            let _lock = Self::lock_card(Path::new(&other.path))?;
+            let Ok(mut other) = Self::read_card(Path::new(&other.path)).map(|mut c| {
+                c.scope = other.scope;
+                c
+            }) else {
+                continue;
+            };
+            if other.meta.status != TaskStatus::Blocked {
+                continue;
+            }
+            let remaining_blockers = other
+                .meta
+                .blocked_by
+                .iter()
+                .filter(|bid| {
+                    if bid.eq_ignore_ascii_case(completed_id) {
                         return false;
                     }
                     if let Ok(b_card) = self.find_task(bid) {
@@ -1388,34 +1576,62 @@ views:
                     } else {
                         false
                     }
-                }).count();
+                })
+                .count();
 
-                if remaining_blockers == 0 {
-                    let other_prev = other.meta.status.as_str().to_string();
-                    other.meta.status = TaskStatus::Ready;
-                    other.meta.updated = today.clone();
-                    other.body = format!(
-                        "{}\n- `{}`: Auto-unblocked -> `ready` (blocker `{}` completed).",
-                        other.body.trim_end(),
-                        now_ts,
-                        card.meta.id
-                    );
-                    let _ = self.write_card(&other);
-                    let _ = self.log_event(
-                        &other.meta.id,
-                        "unblocked",
-                        "system",
-                        other.meta.session_id.as_deref(),
-                        Some(&other_prev),
-                        "ready",
-                        None,
-                        &other.meta.title,
-                    );
-                }
+            if remaining_blockers == 0 {
+                let other_prev = other.meta.status.as_str().to_string();
+                other.meta.status = TaskStatus::Ready;
+                other.meta.updated = today.to_string();
+                other.body = format!(
+                    "{}\n- `{}`: Auto-unblocked -> `ready` (blocker `{}` completed).",
+                    other.body.trim_end(),
+                    now_ts,
+                    completed_id
+                );
+                let _ = self.write_card(&other);
+                let _ = self.log_event(
+                    &other.meta.id,
+                    "unblocked",
+                    "system",
+                    other.meta.session_id.as_deref(),
+                    Some(&other_prev),
+                    "ready",
+                    None,
+                    &other.meta.title,
+                );
             }
         }
+        Ok(())
+    }
 
-        Ok(card)
+    /// Git tree hash of the working tree that evals run in, excluding the task cards themselves
+    /// (they change on every transition). Built with a throwaway index, so the user's index and
+    /// refs are untouched. `None` outside a git repo, or when the cards are the repo root.
+    pub fn worktree_snapshot(&self) -> Option<String> {
+        let dir = Path::new(&self.config.vault_path);
+        let top = PathBuf::from(git_output(dir, &["rev-parse", "--show-toplevel"], None)?);
+        let top_canon = top.canonicalize().ok()?;
+        let mut pathspecs = vec![".".to_string()];
+        if let Ok(tasks_canon) = self.tasks_path.canonicalize()
+            && let Ok(rel) = tasks_canon.strip_prefix(&top_canon)
+        {
+            if rel.as_os_str().is_empty() {
+                return None;
+            }
+            pathspecs.push(format!(":(exclude){}", rel.display()));
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let index = std::env::temp_dir().join(format!("tkmd-index-{}-{}", std::process::id(), nanos));
+        let mut add_args = vec!["add", "-A", "--"];
+        add_args.extend(pathspecs.iter().map(String::as_str));
+        let tree = git_output(&top, &add_args, Some(index.as_path()))
+            .and_then(|_| git_output(&top, &["write-tree"], Some(index.as_path())));
+        let _ = fs::remove_file(&index);
+        tree.filter(|t| !t.is_empty())
     }
 
     /// Update properties on a task card (title, priority, owner, due, dod, eval).
@@ -1506,6 +1722,12 @@ views:
                 card.body = format!("{}\n\n{}\n", card.body.trim_end(), eval_block);
             }
             changes.push(format!("eval -> '{}'", e));
+            // Changing the check invalidates any review built on the old one.
+            if card.meta.status == TaskStatus::PendingClose {
+                card.meta.status = TaskStatus::InProgress;
+                card.meta.receipt = None;
+                changes.push("status -> in-progress (review invalidated by eval change)".to_string());
+            }
         }
 
         if changes.is_empty() {
@@ -1522,26 +1744,38 @@ views:
 
     /// Add dependency: `dependent_id` will be blocked by `blocker_ids`.
     pub fn add_dependency(&self, dependent_id: &str, blocker_ids: &[String]) -> Result<TaskCard> {
-        let mut dep_card = self.find_task(dependent_id)?;
+        let found = self.find_task(dependent_id)?;
         let today = Local::now().format("%Y-%m-%d").to_string();
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
 
-        let mut added = Vec::new();
+        let mut blockers = Vec::new();
         for raw in blocker_ids {
             let blocker = self.find_task(raw)?;
-            if blocker.meta.id.eq_ignore_ascii_case(&dep_card.meta.id) {
-                bail!("Task cannot depend on itself: {}", dep_card.meta.id);
+            if blocker.meta.id.eq_ignore_ascii_case(&found.meta.id) {
+                bail!("Task cannot depend on itself: {}", found.meta.id);
             }
+            blockers.push(blocker);
+        }
+
+        // Update each blocker's `blocks` array under its own lock (one card locked at a time).
+        for blocker in &blockers {
+            let _lock = Self::lock_card(Path::new(&blocker.path))?;
+            let mut blocker_card = Self::read_card(Path::new(&blocker.path))?;
+            blocker_card.scope = blocker.scope;
+            if !blocker_card.meta.blocks.iter().any(|b| b.eq_ignore_ascii_case(&found.meta.id)) {
+                blocker_card.meta.blocks.push(found.meta.id.clone());
+                self.write_card(&blocker_card)?;
+            }
+        }
+
+        let _lock = Self::lock_card(Path::new(&found.path))?;
+        let mut dep_card = Self::read_card(Path::new(&found.path))?;
+        dep_card.scope = found.scope;
+        let mut added = Vec::new();
+        for blocker in &blockers {
             if !dep_card.meta.blocked_by.iter().any(|b| b.eq_ignore_ascii_case(&blocker.meta.id)) {
                 dep_card.meta.blocked_by.push(blocker.meta.id.clone());
                 added.push(blocker.meta.id.clone());
-
-                // Also update blocker's blocks array
-                let mut blocker_card = blocker.clone();
-                if !blocker_card.meta.blocks.iter().any(|b| b.eq_ignore_ascii_case(&dep_card.meta.id)) {
-                    blocker_card.meta.blocks.push(dep_card.meta.id.clone());
-                    self.write_card(&blocker_card)?;
-                }
             }
         }
 
@@ -1902,6 +2136,20 @@ pub fn slugify(title: &str) -> String {
     trimmed.chars().take(45).collect::<String>().trim_end_matches('-').to_string()
 }
 
+/// Run `git -C <dir> <args>`, optionally against a throwaway index. `None` on any failure.
+fn git_output(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(args);
+    if let Some(i) = index {
+        cmd.env("GIT_INDEX_FILE", i);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1921,6 +2169,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
 
         let store = TaskStore {
@@ -1983,6 +2232,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
 
         let store = std::sync::Arc::new(TaskStore {
@@ -2050,6 +2300,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
         let cfg_local = AppConfig {
             mode: "cli".to_string(),
@@ -2060,6 +2311,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
 
         let global_store = TaskStore {
@@ -2122,6 +2374,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
 
         let store = TaskStore {
@@ -2169,6 +2422,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
 
         let store = TaskStore {
@@ -2213,6 +2467,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
 
         let store = TaskStore {
@@ -2260,6 +2515,7 @@ mod tests {
             default_owner: "ken".to_string(),
             obsidian_vault_name: None,
             editor: None,
+            policy: Policy::default(),
         };
 
         let store = TaskStore {
@@ -2288,9 +2544,12 @@ mod tests {
         // Agent submits for review
         store.submit_for_review("1", "agent", Some("All ready"), None).unwrap();
 
-        // Human completes task
-        let done_card = store.complete_task("1", "ken", Some("LGTM approved")).unwrap();
+        // Human completes task at an interactive terminal
+        let done_card = store
+            .complete_task_with("1", "ken", Some("LGTM approved"), Approval::Interactive)
+            .unwrap();
         assert_eq!(done_card.meta.status, TaskStatus::Done);
+        assert_eq!(done_card.meta.approval.as_deref(), Some("interactive"));
         // DoD items must now be checked off (- [x])
         assert!(done_card.body.contains("- [x] Unit tests pass"));
         assert!(done_card.body.contains("- [x] Docs written"));
@@ -2319,6 +2578,175 @@ mod tests {
         assert!(cards.is_empty());
         assert!(!local_store.tasks_path.exists());
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    fn hardening_store(name: &str) -> (TaskStore, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("tkmd-harden-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("tasks")).unwrap();
+        let cfg = AppConfig {
+            mode: "cli".to_string(),
+            vault_path: tmp.to_string_lossy().to_string(),
+            tasks_dir: "tasks".to_string(),
+            base_file: String::new(),
+            daily_dir: String::new(),
+            default_owner: "ken".to_string(),
+            obsidian_vault_name: None,
+            editor: None,
+            policy: Policy::default(),
+        };
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: cfg,
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
+            is_uninitialized_local: false,
+        };
+        (store, tmp)
+    }
+
+    fn git_available() -> bool {
+        Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success();
+        assert!(ok, "git {:?} failed", args);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_card_lock_is_held_until_dropped() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (store, tmp) = hardening_store("lock");
+        let card = store.add_task("p1 Locked card", None, vec![], None, None).unwrap();
+        let path = PathBuf::from(&card.path);
+
+        let held = TaskStore::lock_card(&path).unwrap();
+        let acquired = Arc::new(AtomicBool::new(false));
+        let flag = acquired.clone();
+        let p2 = path.clone();
+        let handle = std::thread::spawn(move || {
+            let _l = TaskStore::lock_card(&p2).unwrap();
+            flag.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!acquired.load(Ordering::SeqCst), "second lock acquired while first was held");
+        drop(held);
+        handle.join().unwrap();
+        assert!(acquired.load(Ordering::SeqCst));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_untrusted_caller_cannot_close_pending_review() {
+        let (store, tmp) = hardening_store("untrusted");
+        store.add_task("p1 Agent work @claude", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+
+        // Claiming to be the owner by name is not enough.
+        let res = store.complete_task("1", "ken", Some("self-approve"));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("awaiting human sign-off"));
+        assert_eq!(store.find_task("1").unwrap().meta.status, TaskStatus::PendingClose);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_claim_guards_owner_and_state() {
+        let (store, tmp) = hardening_store("claim");
+        store.add_task("p1 Shared work", None, vec![], None, None).unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+
+        // Another agent cannot take it silently.
+        let steal = store.claim_task("1", "codex", None, false);
+        assert!(steal.unwrap_err().to_string().contains("`claude` is working on it"));
+        // Re-claiming your own task is fine.
+        store.claim_task("1", "claude", None, false).unwrap();
+        // Forced takeover is allowed and recorded.
+        let taken = store.claim_task("1", "codex", None, true).unwrap();
+        assert_eq!(taken.meta.owner, "codex");
+        assert!(taken.body.contains("forced takeover from `claude`"));
+
+        // Work under review cannot be reclaimed without --force.
+        store.submit_for_review("1", "codex", None, None).unwrap();
+        assert!(store.claim_task("1", "claude", None, false).is_err());
+
+        // Closed work can never be reclaimed.
+        store.add_task("p1 Mine", None, vec![], None, None).unwrap();
+        store.complete_task_with("2", "ken", None, Approval::Interactive).unwrap();
+        assert!(store.claim_task("2", "claude", None, true).is_err());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_require_eval_policy_blocks_no_eval_submit() {
+        let (mut store, tmp) = hardening_store("require-eval");
+        store.config.policy.require_eval = true;
+        store.add_task("p1 Unchecked work", None, vec![], None, None).unwrap();
+        let res = store.submit_for_review("1", "claude", None, None);
+        assert!(res.unwrap_err().to_string().contains("require_eval"));
+        assert_eq!(store.find_task("1").unwrap().meta.status, TaskStatus::Ready);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_no_eval_receipt_is_explicit_and_claim_records_eval() {
+        let (store, tmp) = hardening_store("no-eval");
+        store.add_task("p1 Light task", None, vec![], None, None).unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
+        let receipt = reviewed.meta.receipt.unwrap();
+        assert_eq!(receipt.eval_result, "no-eval");
+        assert_eq!(receipt.submitted_by, "claude");
+        assert_eq!(reviewed.meta.claimed_eval, None);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_eval_change_invalidates_review() {
+        let (store, tmp) = hardening_store("eval-change");
+        store.add_task("p1 Checked work", None, vec![], Some("exit 0".to_string()), None).unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        let updated = store
+            .update_task("1", None, None, None, None, vec![], Some("true".to_string()))
+            .unwrap();
+        assert_eq!(updated.meta.status, TaskStatus::InProgress);
+        assert!(updated.meta.receipt.is_none());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_receipt_goes_stale_when_output_changes() {
+        if !git_available() {
+            eprintln!("skipping: git not installed");
+            return;
+        }
+        let (store, tmp) = hardening_store("stale");
+        git(&tmp, &["init", "-q"]);
+        fs::write(tmp.join("work.txt"), "v1").unwrap();
+        store.add_task("p1 Edit work file", None, vec![], Some("exit 0".to_string()), None).unwrap();
+
+        let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
+        let snap = reviewed.meta.receipt.as_ref().unwrap().snapshot.clone();
+        assert!(snap.is_some(), "expected a git snapshot in a git repo");
+
+        // Card writes must not change the snapshot (cards are excluded).
+        assert_eq!(store.worktree_snapshot(), snap);
+
+        // Output changes after the eval passed: approval is refused.
+        fs::write(tmp.join("work.txt"), "v2").unwrap();
+        let res = store.complete_task_with("1", "ken", None, Approval::Interactive);
+        assert!(res.unwrap_err().to_string().contains("output changed"));
+
+        // Re-submitting binds the new output; approval then succeeds.
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        let done = store.complete_task_with("1", "ken", None, Approval::Interactive).unwrap();
+        assert_eq!(done.meta.status, TaskStatus::Done);
         let _ = fs::remove_dir_all(&tmp);
     }
 }
