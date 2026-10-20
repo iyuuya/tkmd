@@ -2831,7 +2831,7 @@ mod tests {
 
         // Simulate loading an uninitialized local store
         let local_store = TaskStore::load_local_store(&tmp).unwrap();
-        assert_eq!(local_store.is_uninitialized_local, false);
+        assert!(!local_store.is_uninitialized_local);
         // The tasks directory MUST NOT have been created by load_local_store!
         assert!(!local_store.tasks_path.exists());
 

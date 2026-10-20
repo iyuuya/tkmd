@@ -590,8 +590,8 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
     }
 
     if cards.is_empty() {
-        if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {
-            if let Some(ref peer) = store.peer
+        if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All
+            && let Some(ref peer) = store.peer
                 && let Ok(peer_cards) = peer.list_store_cards()
             {
                 let peer_active: Vec<_> = peer_cards
@@ -612,7 +612,6 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
                     return;
                 }
             }
-        }
         println!("{DIM}  ✨ Queue is clear. Add a task with: tk a p1 Task title +project{RESET}  {scope_badge}");
         return;
     }
@@ -624,8 +623,8 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
         .iter()
         .filter(|c| c.meta.status == TaskStatus::PendingClose)
         .collect();
-    if pending_review.is_empty() && store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {
-        if let Some(ref peer) = store.peer
+    if pending_review.is_empty() && store.scope == CardScope::Local && store.active_scope != ScopeSelection::All
+        && let Some(ref peer) = store.peer
             && let Ok(peer_cards) = peer.list_store_cards()
         {
             let peer_pending: Vec<_> = peer_cards
@@ -639,7 +638,6 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
                 );
             }
         }
-    }
     if !pending_review.is_empty() {
         if term_w >= 105 {
             println!(
@@ -904,8 +902,8 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
     }
 
     if pending.is_empty() {
-        if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {
-            if let Some(ref peer) = store.peer
+        if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All
+            && let Some(ref peer) = store.peer
                 && let Ok(peer_cards) = peer.list_store_cards()
             {
                 let peer_pending: Vec<_> = peer_cards
@@ -918,7 +916,6 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
                     return Ok(());
                 }
             }
-        }
         println!("{GREEN}  ✨ No tasks awaiting sign-off! All tasks are clear or done.{RESET}");
         println!("  {DIM}Submit a task for review with: tk r <id> -n \"Summary\"{RESET}");
         if store.uninitialized_git_repo.is_some() {
