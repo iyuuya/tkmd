@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-21
+
+### Security
+- **The check is pinned at claim** (suggested by prpatel05 on dev.to). The first claim records the eval command and a git blob hash of each repo file it names; re-claiming keeps the pin. If an agent changes the eval or its script before submitting, the receipt records what changed and `tk d` refuses until the human passes `--accept-changed-eval`. Previously this only warned.
+- `tk auto` pins the eval's files too: a script changed after approval no longer auto-closes; the task waits for manual sign-off.
+- A file the eval names that changes after submit now blocks approval even outside git, where there is no worktree snapshot.
+
+### Changed
+- `tk d` gains `--accept-changed-eval`; the sign-off summary shows exactly what changed (`check.sh changed`, ``eval `a` -> `b` ``).
+
 ## [0.2.0] - 2026-10-21
 
 ### Security

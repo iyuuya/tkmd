@@ -187,6 +187,9 @@ enum Commands {
         /// Close every task awaiting sign-off (`pending-close`) after one confirmation
         #[arg(long)]
         pending: bool,
+        /// Accept a check (eval command or its script) that changed since the task was claimed
+        #[arg(long)]
+        accept_changed_eval: bool,
         /// Who is asking to close the task (log context only). Approval comes from a person at an
         /// interactive terminal.
         #[arg(short, long)]
@@ -1371,6 +1374,7 @@ pub fn run() -> Result<()> {
         Commands::Done {
             ids,
             pending,
+            accept_changed_eval,
             actor,
             note,
         } => {
@@ -1393,6 +1397,7 @@ pub fn run() -> Result<()> {
                     note.as_deref(),
                     approval,
                     shown,
+                    accept_changed_eval,
                 ) {
                     Ok(c) => println!(
                         "{}",
@@ -2775,12 +2780,16 @@ fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
                 writeln!(err, "      {ORANGE}warning:{RESET} no automated check ran")?;
             }
         }
-        if card.meta.receipt.is_some() && card.meta.claimed_eval != card.meta.eval {
+        if let Some(change) = card
+            .meta
+            .receipt
+            .as_ref()
+            .and_then(|r| r.check_changed.as_ref())
+        {
             writeln!(
                 err,
-                "      {ORANGE}warning:{RESET} eval changed after claim: `{}` -> `{}`",
-                card.meta.claimed_eval.as_deref().unwrap_or("none"),
-                card.meta.eval.as_deref().unwrap_or("none")
+                "      {RED}check changed since claim:{RESET} {} (approve only with --accept-changed-eval)",
+                change
             )?;
         }
     }
@@ -2966,6 +2975,20 @@ mod tests {
             .collect();
         assert_eq!(done_targets(&store, &ids, false).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_cli_parse_accept_changed_eval() {
+        match Cli::try_parse_from(["tk", "d", "1", "--accept-changed-eval"])
+            .unwrap()
+            .command
+        {
+            Some(Commands::Done {
+                accept_changed_eval,
+                ..
+            }) => assert!(accept_changed_eval),
+            other => panic!("Expected Done, got {:?}", other),
+        }
     }
 
     #[test]
