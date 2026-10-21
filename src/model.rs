@@ -1,4 +1,28 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
+/// Every configured human owner (`default_owner` of each loaded store).
+static HUMAN_OWNERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Register a configured human owner so session helpers never treat them as an agent CLI.
+/// Local and global stores may configure different owners; all of them count.
+pub fn set_human_owner(name: &str) {
+    let n = name.trim().trim_start_matches('@').to_lowercase();
+    if let Ok(mut set) = HUMAN_OWNERS.get_or_init(Default::default).lock() {
+        set.insert(n);
+    }
+}
+
+/// True for the configured owner and the generic human labels.
+pub fn is_human(name: &str) -> bool {
+    let n = name.trim().trim_start_matches('@').to_lowercase();
+    matches!(n.as_str(), "ken" | "human" | "user" | "")
+        || HUMAN_OWNERS
+            .get()
+            .and_then(|m| m.lock().ok().map(|set| set.contains(&n)))
+            .unwrap_or(false)
+}
 
 /// Task lifecycle states — maps 1:1 to Obsidian 1.14 Bases Kanban columns.
 /// Includes `PendingClose` so AI agents submit work for evaluation/sign-off before `Done`.
@@ -83,17 +107,50 @@ pub struct TaskFrontmatter {
     pub eval: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eval_status: Option<String>,
+    /// The `eval` command as it stood when the task was claimed, so a reviewer can see
+    /// whether the agent changed its own check while working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_eval: Option<String>,
+    /// What the agent submitted for review: the exact output snapshot and the check that passed on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ReviewReceipt>,
+    /// The eval command a human approved for auto-acceptance (`tk auto`). When the task's
+    /// current `eval` equals this and passes on submit, the task closes without a manual sign-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_eval: Option<String>,
+    /// How the final sign-off was given (`interactive` or `auto:eval`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
     pub created: String,
     pub updated: String,
     #[serde(default = "default_true")]
     pub _organized: bool,
 }
 
+/// Recorded at `pending-close`: binds the eval result to the exact output under review.
+/// `snapshot` is a git tree hash of the working tree (task cards excluded); `None` outside a git repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    /// Why there is no snapshot (e.g. `not a git repository`, `git unavailable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval: Option<String>,
+    /// `passed` or `no-eval`
+    pub eval_result: String,
+    pub submitted_by: String,
+    pub submitted_at: String,
+}
+
 /// Verified CLI command to CONTINUE the most recent session for a given agent in the current workspace.
 pub fn agent_continue_cmd(agent: &str) -> Option<String> {
     let a = agent.trim().trim_start_matches('@').to_lowercase();
+    if is_human(&a) {
+        return None;
+    }
     match a.as_str() {
-        "ken" | "human" | "user" | "" => None,
         "agy" | "antigravity" => Some("agy -c".to_string()),
         "claude" | "claude-code" => Some("claude -c".to_string()),
         "codex" => Some("codex resume --last".to_string()),
@@ -121,6 +178,9 @@ pub fn agent_resume_cmd(agent: &str, sid: Option<&str>) -> Option<String> {
     if raw.contains(' ') {
         return Some(raw.to_string());
     }
+    if is_human(&a) {
+        return None;
+    }
     let cmd = match a.as_str() {
         "agy" | "antigravity" => format!("agy --conversation {}", raw),
         "claude" | "claude-code" => format!("claude -r {}", raw),
@@ -129,7 +189,6 @@ pub fn agent_resume_cmd(agent: &str, sid: Option<&str>) -> Option<String> {
         "opencode" | "oc" => format!("opencode -s {}", raw),
         "gemini" => format!("gemini -r {}", raw),
         "pi" => format!("pi --session {}", raw),
-        "ken" | "human" | "user" | "" => return None,
         other => format!("{} -r {}", other, raw),
     };
     Some(cmd)
@@ -191,7 +250,6 @@ pub enum CardScope {
     Global,
 }
 
-
 impl std::fmt::Display for CardScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -225,4 +283,19 @@ pub struct TaskEvent {
     pub to_status: String,
     pub eval_passed: Option<bool>,
     pub title: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RED (Sourcery #23): only the first configured owner was registered as human.
+    #[test]
+    fn test_every_configured_owner_is_human() {
+        set_human_owner("alice-owner");
+        set_human_owner("bob-owner");
+        assert!(is_human("alice-owner"));
+        assert!(is_human("bob-owner"));
+        assert!(!is_human("claude"));
+    }
 }

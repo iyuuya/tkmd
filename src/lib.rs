@@ -1,23 +1,25 @@
 #![allow(clippy::too_many_arguments, clippy::manual_clamp)]
 
 mod analytics;
+mod ansi;
 mod mcp;
 mod model;
 mod store;
 mod todotxt;
 
+use ansi::Ansi;
 use anyhow::Result;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
 use model::{CardScope, TaskCard, TaskStatus};
 use std::process::Command;
-use store::{ScopeSelection, TaskStore};
+use store::{Approval, ScopeSelection, TaskStore};
 
 fn get_color_choice() -> ColorChoice {
     if std::env::var("NO_COLOR").is_ok() {
         ColorChoice::Never
     } else {
-        ColorChoice::Always
+        ColorChoice::Auto
     }
 }
 
@@ -33,16 +35,16 @@ fn cli_styles() -> Styles {
 }
 
 // ANSI colors tuned to Ken's Starship palette (`ken-custom`)
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const BOLD_WHITE: &str = "\x1b[1;97m";
-const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[38;2;224;108;117m"; // #e06c75
-const ORANGE: &str = "\x1b[38;2;254;128;25m"; // #fe8019
-const AQUA: &str = "\x1b[38;2;86;182;194m"; // #56b6c2
-const BLUE: &str = "\x1b[38;2;74;142;194m"; // #4a8ec2
-const GREEN: &str = "\x1b[38;2;152;195;121m"; // #98c379
-const PURPLE: &str = "\x1b[38;2;198;120;221m"; // #c678dd
+const RESET: Ansi = Ansi("\x1b[0m");
+const BOLD: Ansi = Ansi("\x1b[1m");
+const BOLD_WHITE: Ansi = Ansi("\x1b[1;97m");
+const DIM: Ansi = Ansi("\x1b[2m");
+const RED: Ansi = Ansi("\x1b[38;2;224;108;117m"); // #e06c75
+const ORANGE: Ansi = Ansi("\x1b[38;2;254;128;25m"); // #fe8019
+const AQUA: Ansi = Ansi("\x1b[38;2;86;182;194m"); // #56b6c2
+const BLUE: Ansi = Ansi("\x1b[38;2;74;142;194m"); // #4a8ec2
+const GREEN: Ansi = Ansi("\x1b[38;2;152;195;121m"); // #98c379
+const PURPLE: Ansi = Ansi("\x1b[38;2;198;120;221m"); // #c678dd
 
 #[derive(Parser)]
 #[command(
@@ -125,12 +127,15 @@ enum Commands {
     Claim {
         /// Task ID (e.g. 1 or tk-001)
         id: String,
-        /// Who is claiming the task (e.g. ken, claude, codex, hermes, pi)
-        #[arg(short, long, default_value = "ken")]
-        owner: String,
+        /// Who is claiming the task (e.g. claude, codex, hermes, pi). Defaults to the configured owner.
+        #[arg(short, long)]
+        owner: Option<String>,
         /// Agent session ID or resume command (e.g. 8y9380573586 or "claude -r 8y9380573586")
         #[arg(short, long)]
         session: Option<String>,
+        /// Take over a task another owner is working on, or pull it back from review (logged)
+        #[arg(long)]
+        force: bool,
     },
     /// Resume or continue an AI agent session attached to a task (e.g. `agy -c`, `agy --conversation <id>`, `claude -r <id>`) (alias: `u`)
     #[command(visible_alias = "u")]
@@ -154,18 +159,18 @@ enum Commands {
     Eval {
         /// Task ID (e.g. 1 or tk-001)
         id: String,
-        /// Who is running the eval
-        #[arg(short, long, default_value = "ken")]
-        actor: String,
+        /// Who is running the eval. Defaults to the configured owner.
+        #[arg(short, long)]
+        actor: Option<String>,
     },
     /// Submit task to pending-close (tk r 1) or view pending sign-off review queue (tk r / tk review)
     #[command(visible_alias = "r", alias = "rev")]
     Review {
         /// Task ID (e.g. 1 or tk-001). If omitted, displays review queue of tasks awaiting sign-off.
         id: Option<String>,
-        /// Who is submitting the task for review
-        #[arg(short, long, default_value = "agent")]
-        actor: String,
+        /// Who is submitting the task for review (default: you at a terminal, `agent` otherwise)
+        #[arg(short, long)]
+        actor: Option<String>,
         /// Summary note or [[wikilink]] to artifact
         #[arg(short, long)]
         note: Option<String>,
@@ -176,11 +181,16 @@ enum Commands {
     /// Complete a task -> done + Daily Note log (alias: `d`)
     #[command(visible_alias = "d")]
     Done {
-        /// Task ID (e.g. 1 or tk-001)
-        id: String,
-        /// Who completed/approved the task
-        #[arg(short, long, default_value = "ken")]
-        actor: String,
+        /// Task ID(s) (e.g. 1 or tk-001; several: `tk d 1 2 3`)
+        #[arg(required_unless_present = "pending")]
+        ids: Vec<String>,
+        /// Close every task awaiting sign-off (`pending-close`) after one confirmation
+        #[arg(long)]
+        pending: bool,
+        /// Who is asking to close the task (log context only). Approval comes from a person at an
+        /// interactive terminal.
+        #[arg(short, long)]
+        actor: Option<String>,
         /// Optional completion note or [[wikilink]]
         #[arg(short, long)]
         note: Option<String>,
@@ -338,6 +348,19 @@ enum Commands {
         #[arg(long)]
         color: bool,
     },
+    /// Check every card against the event log; exit 1 if a card's state was not recorded
+    /// (for example a card hand-edited to `done`)
+    Doctor,
+    /// Approve a task's eval so the task closes itself when that check passes on submit.
+    /// Human-only: run it at a terminal. `--off` returns the task(s) to manual sign-off.
+    Auto {
+        /// Task ID(s) (e.g. 1 or tk-001; several: `tk auto 1 2 3`)
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Turn auto-accept off (manual sign-off again)
+        #[arg(long)]
+        off: bool,
+    },
     /// Archive completed tasks: moves done task .md cards into tasks/archive/ (preserves .events.jsonl DB)
     Archive {
         /// Optional specific Task ID to archive
@@ -490,7 +513,7 @@ fn color_status_compact(st: &TaskStatus) -> String {
 fn color_owner(owner: &str, width: usize) -> String {
     let truncated = truncate_str(owner, width.saturating_sub(1));
     let padded = format!("@{:<w$}", truncated, w = width.saturating_sub(1));
-    if owner.eq_ignore_ascii_case("ken") {
+    if model::is_human(owner) {
         format!("{BOLD}{GREEN}{}{RESET}", padded)
     } else {
         format!("{PURPLE}{}{RESET}", padded)
@@ -523,28 +546,44 @@ fn format_title_cell(title: &str, proj: Option<&str>, col_width: usize) -> Strin
 fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
     let scope_badge = match store.active_scope {
         ScopeSelection::Local => format!("{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks)]{RESET}"),
-        ScopeSelection::Global => format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks)]{RESET}"),
-        ScopeSelection::All => format!("{DIM}[Scope: {BOLD_WHITE}Merged{RESET}{DIM} (Local + Global)]{RESET}"),
+        ScopeSelection::Global => {
+            format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks)]{RESET}")
+        }
+        ScopeSelection::All => {
+            format!("{DIM}[Scope: {BOLD_WHITE}Merged{RESET}{DIM} (Local + Global)]{RESET}")
+        }
         ScopeSelection::Auto => {
             if store.scope == CardScope::Local {
-                format!("{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks) · use -A for all, -G for global]{RESET}")
+                format!(
+                    "{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks) · use -A for all, -G for global]{RESET}"
+                )
             } else if store.uninitialized_git_repo.is_some() {
-                format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Git repo without ./tasks · run {AQUA}tk init -L{RESET}{DIM} to init]{RESET}")
+                format!(
+                    "{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Git repo without ./tasks · run {AQUA}tk init -L{RESET}{DIM} to init]{RESET}"
+                )
             } else {
-                format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · use -L for local]{RESET}")
+                format!(
+                    "{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · use -L for local]{RESET}"
+                )
             }
         }
     };
 
     if store.is_uninitialized_local {
-        println!("{ORANGE}  ⚠ No local task tracking in this project (no ./tasks directory).{RESET}  {scope_badge}");
-        println!("  {DIM}↳ Initialize with:{RESET} {AQUA}tk init -L{RESET}  {DIM}(or run tk -G for global tasks){RESET}");
+        println!(
+            "{ORANGE}  ⚠ No local task tracking in this project (no ./tasks directory).{RESET}  {scope_badge}"
+        );
+        println!(
+            "  {DIM}↳ Initialize with:{RESET} {AQUA}tk init -L{RESET}  {DIM}(or run tk -G for global tasks){RESET}"
+        );
         if let Some(ref peer) = store.peer
             && let Ok(peer_cards) = peer.list_store_cards()
         {
             let peer_active: Vec<_> = peer_cards
                 .iter()
-                .filter(|c| c.meta.status != TaskStatus::Done && c.meta.status != TaskStatus::Archived)
+                .filter(|c| {
+                    c.meta.status != TaskStatus::Done && c.meta.status != TaskStatus::Archived
+                })
                 .collect();
             let peer_pending: Vec<_> = peer_active
                 .iter()
@@ -570,30 +609,40 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
     }
 
     if cards.is_empty() {
-        if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {
-            if let Some(ref peer) = store.peer
-                && let Ok(peer_cards) = peer.list_store_cards()
-            {
-                let peer_active: Vec<_> = peer_cards
-                    .iter()
-                    .filter(|c| c.meta.status != TaskStatus::Done && c.meta.status != TaskStatus::Archived)
-                    .collect();
-                let peer_pending: Vec<_> = peer_active
-                    .iter()
-                    .filter(|c| c.meta.status == TaskStatus::PendingClose)
-                    .collect();
-                if !peer_pending.is_empty() {
-                    println!("{DIM}  ✨ Local queue is clear.{RESET}  {scope_badge}");
-                    println!("  {BOLD}{PURPLE}↳ Notice:{RESET} {BOLD}{}{RESET} tasks awaiting review in global vault (run {AQUA}tk -G r{RESET} or {AQUA}tk -A r{RESET})", peer_pending.len());
-                    return;
-                } else if !peer_active.is_empty() {
-                    println!("{DIM}  ✨ Local queue is clear.{RESET}  {scope_badge}");
-                    println!("  {BOLD}{PURPLE}↳ Notice:{RESET} {BOLD}{}{RESET} active tasks in global vault (run {AQUA}tk -G{RESET} or {AQUA}tk -A{RESET})", peer_active.len());
-                    return;
-                }
+        if store.scope == CardScope::Local
+            && store.active_scope != ScopeSelection::All
+            && let Some(ref peer) = store.peer
+            && let Ok(peer_cards) = peer.list_store_cards()
+        {
+            let peer_active: Vec<_> = peer_cards
+                .iter()
+                .filter(|c| {
+                    c.meta.status != TaskStatus::Done && c.meta.status != TaskStatus::Archived
+                })
+                .collect();
+            let peer_pending: Vec<_> = peer_active
+                .iter()
+                .filter(|c| c.meta.status == TaskStatus::PendingClose)
+                .collect();
+            if !peer_pending.is_empty() {
+                println!("{DIM}  ✨ Local queue is clear.{RESET}  {scope_badge}");
+                println!(
+                    "  {BOLD}{PURPLE}↳ Notice:{RESET} {BOLD}{}{RESET} tasks awaiting review in global vault (run {AQUA}tk -G r{RESET} or {AQUA}tk -A r{RESET})",
+                    peer_pending.len()
+                );
+                return;
+            } else if !peer_active.is_empty() {
+                println!("{DIM}  ✨ Local queue is clear.{RESET}  {scope_badge}");
+                println!(
+                    "  {BOLD}{PURPLE}↳ Notice:{RESET} {BOLD}{}{RESET} active tasks in global vault (run {AQUA}tk -G{RESET} or {AQUA}tk -A{RESET})",
+                    peer_active.len()
+                );
+                return;
             }
         }
-        println!("{DIM}  ✨ Queue is clear. Add a task with: tk a p1 Task title +project{RESET}  {scope_badge}");
+        println!(
+            "{DIM}  ✨ Queue is clear. Add a task with: tk a p1 Task title +project{RESET}  {scope_badge}"
+        );
         return;
     }
 
@@ -604,20 +653,21 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
         .iter()
         .filter(|c| c.meta.status == TaskStatus::PendingClose)
         .collect();
-    if pending_review.is_empty() && store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {
-        if let Some(ref peer) = store.peer
-            && let Ok(peer_cards) = peer.list_store_cards()
-        {
-            let peer_pending: Vec<_> = peer_cards
-                .iter()
-                .filter(|c| c.meta.status == TaskStatus::PendingClose)
-                .collect();
-            if !peer_pending.is_empty() {
-                println!(
-                    "\n{DIM}  ↳ Notice: {BOLD}{}{RESET}{DIM} tasks awaiting sign-off in global vault (run {AQUA}tk -G r{RESET}{DIM} or {AQUA}tk -A r{RESET}{DIM}){RESET}",
-                    peer_pending.len()
-                );
-            }
+    if pending_review.is_empty()
+        && store.scope == CardScope::Local
+        && store.active_scope != ScopeSelection::All
+        && let Some(ref peer) = store.peer
+        && let Ok(peer_cards) = peer.list_store_cards()
+    {
+        let peer_pending: Vec<_> = peer_cards
+            .iter()
+            .filter(|c| c.meta.status == TaskStatus::PendingClose)
+            .collect();
+        if !peer_pending.is_empty() {
+            println!(
+                "\n{DIM}  ↳ Notice: {BOLD}{}{RESET}{DIM} tasks awaiting sign-off in global vault (run {AQUA}tk -G r{RESET}{DIM} or {AQUA}tk -A r{RESET}{DIM}){RESET}",
+                peer_pending.len()
+            );
         }
     }
     if !pending_review.is_empty() {
@@ -642,7 +692,11 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
         }
 
         for c in &pending_review {
-            let short_id = c.meta.id.trim_start_matches("tk-0").trim_start_matches("tk-");
+            let short_id = c
+                .meta
+                .id
+                .trim_start_matches("tk-0")
+                .trim_start_matches("tk-");
             let ev = c.meta.eval_status.as_deref().unwrap_or("no-eval");
             let scope_tag = if is_all {
                 match c.scope {
@@ -669,7 +723,10 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
                     .resume_command()
                     .map(|cmd| cmd.chars().count() + 5)
                     .unwrap_or(0);
-                let overhead = 51 + resume_vis_len + scope_tag_len + ev_label.chars().count().saturating_sub(6);
+                let overhead = 51
+                    + resume_vis_len
+                    + scope_tag_len
+                    + ev_label.chars().count().saturating_sub(6);
                 let max_t = term_w.saturating_sub(overhead).max(10);
                 let t = truncate_str(&c.meta.title, max_t);
                 println!(
@@ -835,7 +892,9 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
     }
 
     if store.uninitialized_git_repo.is_some() {
-        println!("{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}\n");
+        println!(
+            "{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}\n"
+        );
     }
 }
 
@@ -848,26 +907,44 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
 
     let scope_badge = match store.active_scope {
         ScopeSelection::Local => format!("{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks)]{RESET}"),
-        ScopeSelection::Global => format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks)]{RESET}"),
-        ScopeSelection::All => format!("{DIM}[Scope: {BOLD_WHITE}Merged{RESET}{DIM} (Local + Global)]{RESET}"),
+        ScopeSelection::Global => {
+            format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks)]{RESET}")
+        }
+        ScopeSelection::All => {
+            format!("{DIM}[Scope: {BOLD_WHITE}Merged{RESET}{DIM} (Local + Global)]{RESET}")
+        }
         ScopeSelection::Auto => {
             if store.scope == CardScope::Local {
-                format!("{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks) · Use -A for all, -G for global]{RESET}")
+                format!(
+                    "{DIM}[Scope: {AQUA}Local{RESET}{DIM} (./tasks) · Use -A for all, -G for global]{RESET}"
+                )
             } else if store.uninitialized_git_repo.is_some() {
-                format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Git repo without ./tasks · run {AQUA}tk init -L{RESET}{DIM} to init]{RESET}")
+                format!(
+                    "{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Git repo without ./tasks · run {AQUA}tk init -L{RESET}{DIM} to init]{RESET}"
+                )
             } else {
-                format!("{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Use -L for local]{RESET}")
+                format!(
+                    "{DIM}[Scope: {PURPLE}Global{RESET}{DIM} (~/Documents/tasks) · Use -L for local]{RESET}"
+                )
             }
         }
     };
 
-    println!("\n{BOLD_WHITE}══════════════════════════════════════════════════════════════════════════════{RESET}");
+    println!(
+        "\n{BOLD_WHITE}══════════════════════════════════════════════════════════════════════════════{RESET}"
+    );
     println!("{BOLD}{PURPLE}📋 TASK SIGN-OFF & REVIEW QUEUE{RESET}  {scope_badge}");
-    println!("{BOLD_WHITE}══════════════════════════════════════════════════════════════════════════════{RESET}");
+    println!(
+        "{BOLD_WHITE}══════════════════════════════════════════════════════════════════════════════{RESET}"
+    );
 
     if store.is_uninitialized_local {
-        println!("{ORANGE}  ⚠ No local task tracking in this project (no ./tasks directory).{RESET}");
-        println!("  {DIM}↳ Initialize with:{RESET} {AQUA}tk init -L{RESET}  {DIM}(or run tk -G r for global review tasks){RESET}");
+        println!(
+            "{ORANGE}  ⚠ No local task tracking in this project (no ./tasks directory).{RESET}"
+        );
+        println!(
+            "  {DIM}↳ Initialize with:{RESET} {AQUA}tk init -L{RESET}  {DIM}(or run tk -G r for global review tasks){RESET}"
+        );
         if let Some(ref peer) = store.peer
             && let Ok(peer_cards) = peer.list_store_cards()
         {
@@ -876,7 +953,10 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
                 .filter(|c| c.meta.status == TaskStatus::PendingClose)
                 .collect();
             if !peer_pending.is_empty() {
-                println!("  {DIM}↳ Your global vault has {BOLD}{}{RESET}{DIM} tasks awaiting sign-off (run {AQUA}tk -G r{RESET}{DIM}){RESET}", peer_pending.len());
+                println!(
+                    "  {DIM}↳ Your global vault has {BOLD}{}{RESET}{DIM} tasks awaiting sign-off (run {AQUA}tk -G r{RESET}{DIM}){RESET}",
+                    peer_pending.len()
+                );
             }
         }
         println!();
@@ -884,57 +964,82 @@ fn print_review_dashboard(store: &TaskStore) -> Result<()> {
     }
 
     if pending.is_empty() {
-        if store.scope == CardScope::Local && store.active_scope != ScopeSelection::All {
-            if let Some(ref peer) = store.peer
-                && let Ok(peer_cards) = peer.list_store_cards()
-            {
-                let peer_pending: Vec<_> = peer_cards
-                    .iter()
-                    .filter(|c| c.meta.status == TaskStatus::PendingClose)
-                    .collect();
-                if !peer_pending.is_empty() {
-                    println!("{GREEN}  ✨ No local tasks awaiting sign-off!{RESET}");
-                    println!("  {BOLD}{PURPLE}↳ Notice:{RESET} {BOLD}{}{RESET} tasks awaiting review in global vault (run {AQUA}tk -G r{RESET} or {AQUA}tk -A r{RESET})\n", peer_pending.len());
-                    return Ok(());
-                }
+        if store.scope == CardScope::Local
+            && store.active_scope != ScopeSelection::All
+            && let Some(ref peer) = store.peer
+            && let Ok(peer_cards) = peer.list_store_cards()
+        {
+            let peer_pending: Vec<_> = peer_cards
+                .iter()
+                .filter(|c| c.meta.status == TaskStatus::PendingClose)
+                .collect();
+            if !peer_pending.is_empty() {
+                println!("{GREEN}  ✨ No local tasks awaiting sign-off!{RESET}");
+                println!(
+                    "  {BOLD}{PURPLE}↳ Notice:{RESET} {BOLD}{}{RESET} tasks awaiting review in global vault (run {AQUA}tk -G r{RESET} or {AQUA}tk -A r{RESET})\n",
+                    peer_pending.len()
+                );
+                return Ok(());
             }
         }
         println!("{GREEN}  ✨ No tasks awaiting sign-off! All tasks are clear or done.{RESET}");
         println!("  {DIM}Submit a task for review with: tk r <id> -n \"Summary\"{RESET}");
         if store.uninitialized_git_repo.is_some() {
-            println!("{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}");
+            println!(
+                "{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}"
+            );
         }
         println!();
         return Ok(());
     }
 
-    let local_pending: Vec<_> = pending.iter().filter(|c| c.scope == CardScope::Local).collect();
-    let global_pending: Vec<_> = pending.iter().filter(|c| c.scope == CardScope::Global).collect();
+    let local_pending: Vec<_> = pending
+        .iter()
+        .filter(|c| c.scope == CardScope::Local)
+        .collect();
+    let global_pending: Vec<_> = pending
+        .iter()
+        .filter(|c| c.scope == CardScope::Global)
+        .collect();
 
     if !local_pending.is_empty() {
-        println!("\n{BOLD}{AQUA}📦 Local Project Reviews ({}){RESET}", local_pending.len());
+        println!(
+            "\n{BOLD}{AQUA}📦 Local Project Reviews ({}){RESET}",
+            local_pending.len()
+        );
         for c in &local_pending {
             print_review_card_summary(c);
         }
     }
 
     if !global_pending.is_empty() {
-        println!("\n{BOLD}{PURPLE}🌐 Global Workspace Reviews ({}){RESET}", global_pending.len());
+        println!(
+            "\n{BOLD}{PURPLE}🌐 Global Workspace Reviews ({}){RESET}",
+            global_pending.len()
+        );
         for c in &global_pending {
             print_review_card_summary(c);
         }
     }
 
-    println!("\n{DIM}Sign-off and complete with:{RESET}  {AQUA}tk d <id>{RESET}  {DIM}(or `tk d <id> -n \"LGTM\"`){RESET}");
+    println!(
+        "\n{DIM}Sign-off and complete with:{RESET}  {AQUA}tk d <id>{RESET}  {DIM}(or `tk d <id> -n \"LGTM\"`){RESET}"
+    );
     if store.uninitialized_git_repo.is_some() {
-        println!("{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}");
+        println!(
+            "{DIM}  ↳ Tip: Git repository without ./tasks. Run {AQUA}tk init -L{RESET}{DIM} to initialize a local project backlog.{RESET}"
+        );
     }
     println!();
     Ok(())
 }
 
 fn print_review_card_summary(c: &TaskCard) {
-    let short_id = c.meta.id.trim_start_matches("tk-0").trim_start_matches("tk-");
+    let short_id = c
+        .meta
+        .id
+        .trim_start_matches("tk-0")
+        .trim_start_matches("tk-");
     let ev = c.meta.eval_status.as_deref().unwrap_or("no-eval");
     let ev_colored = match ev {
         "passed" => format!("{GREEN}eval: passed{RESET}"),
@@ -952,15 +1057,27 @@ fn print_review_card_summary(c: &TaskCard) {
         short_id
     );
     if let Some(cmd) = c.meta.resume_command() {
-        println!("         {DIM}↳ resume:{RESET} {AQUA}{cmd}{RESET} {DIM}(or `tk u {short_id}`){RESET}");
+        println!(
+            "         {DIM}↳ resume:{RESET} {AQUA}{cmd}{RESET} {DIM}(or `tk u {short_id}`){RESET}"
+        );
     }
     if !c.meta.dod.is_empty() {
-        let done_dod = c.meta.dod.iter().filter(|d| d.starts_with("[x]") || d.starts_with("✓")).count();
-        println!("         {DIM}↳ DoD criteria:{RESET} {}/{} checked", done_dod, c.meta.dod.len());
+        let done_dod = c
+            .meta
+            .dod
+            .iter()
+            .filter(|d| d.starts_with("[x]") || d.starts_with("✓"))
+            .count();
+        println!(
+            "         {DIM}↳ DoD criteria:{RESET} {}/{} checked",
+            done_dod,
+            c.meta.dod.len()
+        );
     }
 }
 
 pub fn run() -> Result<()> {
+    ansi::init_for_stdout();
     let cli = Cli::parse();
 
     if let Some(Commands::Completions { shell, ref bin }) = cli.command {
@@ -1006,7 +1123,7 @@ pub fn run() -> Result<()> {
                 "{GREEN}✓ Created{RESET} {BOLD}{}{RESET} [{}] ({}) -> {BOLD}{}{RESET}",
                 card.meta.id,
                 color_priority(&card.meta.priority).trim(),
-                color_owner(&card.meta.owner, 9).trim(),
+                color_owner(&card.meta.owner, card.meta.owner.chars().count() + 1),
                 card.meta.title
             );
         }
@@ -1077,23 +1194,45 @@ pub fn run() -> Result<()> {
                     .meta
                     .continue_command()
                     .filter(|c| c != &cmd)
-                    .map(|c| format!("  {DIM}Continue:{RESET} {AQUA}{c}{RESET} {DIM}(`tk u {id} -c`){RESET}"))
+                    .map(|c| {
+                        format!(
+                            "  {DIM}Continue:{RESET} {AQUA}{c}{RESET} {DIM}(`tk u {id} -c`){RESET}"
+                        )
+                    })
                     .unwrap_or_default();
                 println!(
                     "{DIM}Resume:{RESET}   {AQUA}{cmd}{RESET} {DIM}(`tk u {id}`){RESET}{cont}"
                 );
             }
             if !card.meta.blocked_by.is_empty() {
-                println!("{DIM}Blocked by:{RESET} {RED}{}{RESET}", card.meta.blocked_by.join(", "));
+                println!(
+                    "{DIM}Blocked by:{RESET} {RED}{}{RESET}",
+                    card.meta.blocked_by.join(", ")
+                );
             }
             if !card.meta.blocks.is_empty() {
-                println!("{DIM}Blocks:{RESET}     {AQUA}{}{RESET}", card.meta.blocks.join(", "));
+                println!(
+                    "{DIM}Blocks:{RESET}     {AQUA}{}{RESET}",
+                    card.meta.blocks.join(", ")
+                );
+            }
+            if let Some(a) = &card.meta.approved_eval {
+                println!(
+                    "{DIM}Auto-accept:{RESET} {GREEN}closes when `{}` passes{RESET}",
+                    a
+                );
             }
             println!("{DIM}File:       {}{RESET}\n", card.path);
             println!("{}", card.body);
         }
-        Commands::Claim { id, owner, session } => {
-            let card = store.claim_task(&id, &owner, session)?;
+        Commands::Claim {
+            id,
+            owner,
+            session,
+            force,
+        } => {
+            let owner = owner.unwrap_or_else(|| store.config.default_owner.clone());
+            let card = store.claim_task(&id, &owner, session, force)?;
             let sess_info = card
                 .meta
                 .resume_command()
@@ -1116,10 +1255,7 @@ pub fn run() -> Result<()> {
         } => {
             let mut card = store.find_task(&id)?;
             if let Some(ref new_sid) = set {
-                let target_agent = agent
-                    .as_deref()
-                    .unwrap_or(&card.meta.owner)
-                    .to_string();
+                let target_agent = agent.as_deref().unwrap_or(&card.meta.owner).to_string();
                 TaskStore::record_session_on_card(&mut card, &target_agent, Some(new_sid));
                 TaskStore::sync_card_sessions(&mut card);
                 store.write_card(&card)?;
@@ -1145,7 +1281,10 @@ pub fn run() -> Result<()> {
                             None
                         }
                     });
-                    model::agent_resume_cmd(ag, found_sid.as_deref().or(card.meta.session_id.as_deref()))
+                    model::agent_resume_cmd(
+                        ag,
+                        found_sid.as_deref().or(card.meta.session_id.as_deref()),
+                    )
                 }
             } else if continue_latest {
                 card.meta.continue_command()
@@ -1175,11 +1314,18 @@ pub fn run() -> Result<()> {
             }
         }
         Commands::Eval { id, actor } => {
+            let actor = actor.unwrap_or_else(|| store.config.default_owner.clone());
             let (card, passed, output) = store.run_eval(&id, &actor)?;
             if passed {
-                println!("{GREEN}✅ Eval PASSED{RESET} for {BOLD}{}{RESET}: {}", card.meta.id, output);
+                println!(
+                    "{GREEN}✅ Eval PASSED{RESET} for {BOLD}{}{RESET}: {}",
+                    card.meta.id, output
+                );
             } else {
-                println!("{RED}❌ Eval FAILED{RESET} for {BOLD}{}{RESET}: {}", card.meta.id, output);
+                println!(
+                    "{RED}❌ Eval FAILED{RESET} for {BOLD}{}{RESET}: {}",
+                    card.meta.id, output
+                );
                 std::process::exit(1);
             }
         }
@@ -1190,26 +1336,78 @@ pub fn run() -> Result<()> {
             session,
         } => {
             if let Some(task_id) = id {
+                let actor = actor.unwrap_or_else(|| {
+                    if is_interactive() {
+                        store.config.default_owner.clone()
+                    } else {
+                        "agent".to_string()
+                    }
+                });
                 let card = store.submit_for_review(&task_id, &actor, note.as_deref(), session)?;
                 let sess_info = card
                     .meta
                     .resume_command()
                     .map(|cmd| format!(" [resume: `{cmd}`]"))
                     .unwrap_or_default();
-                println!(
-                    "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` (eval passed){}: {}",
-                    card.meta.id, sess_info, card.meta.title
-                );
+                let eval_note = match card.meta.receipt.as_ref().map(|r| r.eval_result.as_str()) {
+                    Some("no-eval") => format!("{ORANGE}no eval ran{RESET}"),
+                    _ => "eval passed".to_string(),
+                };
+                if card.meta.status == TaskStatus::Done {
+                    println!(
+                        "{GREEN}⚡ Auto-accepted{RESET} {BOLD}{}{RESET} (`done`): its approved eval passed: {}",
+                        card.meta.id, card.meta.title
+                    );
+                } else {
+                    println!(
+                        "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` ({}){}: {}",
+                        card.meta.id, eval_note, sess_info, card.meta.title
+                    );
+                }
             } else {
                 print_review_dashboard(&store)?;
             }
         }
-        Commands::Done { id, actor, note } => {
-            let card = store.complete_task(&id, &actor, note.as_deref())?;
-            println!(
-                "{}",
-                done_message(&card.meta.status, &card.meta.id, &card.meta.title)
-            );
+        Commands::Done {
+            ids,
+            pending,
+            actor,
+            note,
+        } => {
+            let actor = actor.unwrap_or_else(|| store.config.default_owner.clone());
+            let cards = done_targets(&store, &ids, pending)?;
+            if cards.is_empty() {
+                println!("{GREEN}  ✨ No tasks awaiting sign-off.{RESET}");
+                return Ok(());
+            }
+            let approval = cli_approval(&store, &cards)?;
+            let mut failed = 0;
+            for card in &cards {
+                // Bind each approval to the receipt shown in the summary.
+                let shown = (card.meta.status == TaskStatus::PendingClose)
+                    .then_some(card.meta.receipt.as_ref())
+                    .flatten();
+                match store.complete_task_confirmed(
+                    &card.meta.id,
+                    &actor,
+                    note.as_deref(),
+                    approval,
+                    shown,
+                ) {
+                    Ok(c) => println!(
+                        "{}",
+                        done_message(&c.meta.status, &c.meta.id, &c.meta.title)
+                    ),
+                    Err(e) if cards.len() > 1 => {
+                        failed += 1;
+                        eprintln!("{RED}✖ Skipped{RESET} {BOLD}{}{RESET}: {}", card.meta.id, e);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!("{} of {} task(s) not closed", failed, cards.len());
+            }
         }
         Commands::Edit { id } => {
             let card = store.find_task(&id)?;
@@ -1269,7 +1467,10 @@ pub fn run() -> Result<()> {
                     rel_path.replace(' ', "%20")
                 );
                 Command::new("open").arg(uri).status()?;
-                println!("{AQUA}↗ Opened {} in Obsidian ({}){RESET}", rel_path, vault_name);
+                println!(
+                    "{AQUA}↗ Opened {} in Obsidian ({}){RESET}",
+                    rel_path, vault_name
+                );
             }
         }
         Commands::Init {
@@ -1287,9 +1488,7 @@ pub fn run() -> Result<()> {
             let default_user = std::env::var("USER").unwrap_or_else(|_| "ken".to_string());
             let detected_vault = store::detect_obsidian_vault();
             let installed_editors = store::detect_installed_editors();
-            let default_editor = editor
-                .clone()
-                .unwrap_or_else(store::detect_editor);
+            let default_editor = editor.clone().unwrap_or_else(store::detect_editor);
 
             let chosen_mode = if local {
                 if obsidian { "obsidian" } else { "cli" }
@@ -1331,8 +1530,13 @@ pub fn run() -> Result<()> {
                     },
                     default_editor
                 );
-                println!("  {GREEN}[1]{RESET} {BOLD}Obsidian 1.14 + CLI (Recommended){RESET} — Kanban `.base` board + Daily Notes + CLI + MCP");
-                println!("  {AQUA}[2]{RESET} {BOLD}Standalone CLI Only{RESET}               — Plain Markdown cards + Editor ({}) + MCP", default_editor);
+                println!(
+                    "  {GREEN}[1]{RESET} {BOLD}Obsidian 1.14 + CLI (Recommended){RESET} — Kanban `.base` board + Daily Notes + CLI + MCP"
+                );
+                println!(
+                    "  {AQUA}[2]{RESET} {BOLD}Standalone CLI Only{RESET}               — Plain Markdown cards + Editor ({}) + MCP",
+                    default_editor
+                );
                 print!("\nChoose mode [1/2, default: {}]: ", auto_mode);
                 io::stdout().flush()?;
                 let mut input = String::new();
@@ -1411,7 +1615,10 @@ pub fn run() -> Result<()> {
                 cfg.mode
             );
             println!("  {DIM}• Config:{RESET}      {}", cfg_path.display());
-            println!("  {DIM}• Tasks dir:{RESET}   {}/{}", cfg.vault_path, cfg.tasks_dir);
+            println!(
+                "  {DIM}• Tasks dir:{RESET}   {}/{}",
+                cfg.vault_path, cfg.tasks_dir
+            );
             println!(
                 "  {DIM}• Editor:{RESET}      {}  {DIM}(used by `tk e <id>`{})",
                 cfg.editor.as_deref().unwrap_or("hx"),
@@ -1422,7 +1629,10 @@ pub fn run() -> Result<()> {
                     "  {DIM}• Kanban Base:{RESET} {}/{}  {DIM}(open with: tk o){RESET}",
                     cfg.vault_path, cfg.base_file
                 );
-                println!("  {DIM}• Daily dir:{RESET}   {}/{}", cfg.vault_path, cfg.daily_dir);
+                println!(
+                    "  {DIM}• Daily dir:{RESET}   {}/{}",
+                    cfg.vault_path, cfg.daily_dir
+                );
             }
             println!(
                 "\n{BOLD}🤖 AI Agent MCP Registration (Claude / Codex / Gemini / OpenCode):{RESET}"
@@ -1435,26 +1645,52 @@ pub fn run() -> Result<()> {
     }}
   }}"#
             );
+            println!("\n{BOLD}⚡ Quickstart Cheatsheet (1-Letter Daily Shortcuts):{RESET}");
             println!(
-                "\n{BOLD}⚡ Quickstart Cheatsheet (1-Letter Daily Shortcuts):{RESET}"
+                "  {AQUA}tk{RESET}                            Render live task dashboard & review banner"
             );
-            println!("  {AQUA}tk{RESET}                            Render live task dashboard & review banner");
-            println!("  {AQUA}tk a p1 Title +proj due:today{RESET}  Create task (supports p0/p1/p2, @owner, +project, sid:<id>)");
+            println!(
+                "  {AQUA}tk a p1 Title +proj due:today{RESET}  Create task (supports p0/p1/p2, @owner, +project, sid:<id>)"
+            );
             println!("  {AQUA}tk c 1 -o agy{RESET}                  Claim task -> in-progress");
-            println!("  {AQUA}tk eval 1{RESET}                      Run automated bash verification command");
-            println!("  {AQUA}tk r 1 -n \"Ready\"{RESET}              Submit to pending-close (auto-evals + triggers macOS notification)");
-            println!("  {AQUA}tk d 1{RESET}                          Sign off and complete task (appends to Daily Note in Obsidian mode)");
-            println!("  {AQUA}tk u 1{RESET}                          Resume AI agent session (or `tk u 1 -c` to continue latest in workspace)");
-            println!("  {AQUA}tk f [query]{RESET}                    Fuzzy search cards (interactive fzf picker with live bat preview)");
-            println!("  {AQUA}tk h [id]{RESET}                       View audit event history & elapsed transition deltas");
-            println!("  {AQUA}tk st{RESET}                           Flow telemetry, agent/human breakdown & bottleneck insights");
-            println!("  {AQUA}tk e 1{RESET}                          Edit task card markdown directly in {}", cfg.editor.as_deref().unwrap_or("hx"));
+            println!(
+                "  {AQUA}tk eval 1{RESET}                      Run automated bash verification command"
+            );
+            println!(
+                "  {AQUA}tk r 1 -n \"Ready\"{RESET}              Submit to pending-close (auto-evals + triggers macOS notification)"
+            );
+            println!(
+                "  {AQUA}tk d 1{RESET}                          Sign off and complete task (appends to Daily Note in Obsidian mode)"
+            );
+            println!(
+                "  {AQUA}tk u 1{RESET}                          Resume AI agent session (or `tk u 1 -c` to continue latest in workspace)"
+            );
+            println!(
+                "  {AQUA}tk f [query]{RESET}                    Fuzzy search cards (interactive fzf picker with live bat preview)"
+            );
+            println!(
+                "  {AQUA}tk h [id]{RESET}                       View audit event history & elapsed transition deltas"
+            );
+            println!(
+                "  {AQUA}tk st{RESET}                           Flow telemetry, agent/human breakdown & bottleneck insights"
+            );
+            println!(
+                "  {AQUA}tk e 1{RESET}                          Edit task card markdown directly in {}",
+                cfg.editor.as_deref().unwrap_or("hx")
+            );
             if cfg.mode == "obsidian" {
-                println!("  {AQUA}tk o [id]{RESET}                      Open Kanban board (or card) in Obsidian");
+                println!(
+                    "  {AQUA}tk o [id]{RESET}                      Open Kanban board (or card) in Obsidian"
+                );
             } else {
-                println!("  {AQUA}tk o [id]{RESET}                      Open tasks directory in {}", cfg.editor.as_deref().unwrap_or("hx"));
+                println!(
+                    "  {AQUA}tk o [id]{RESET}                      Open tasks directory in {}",
+                    cfg.editor.as_deref().unwrap_or("hx")
+                );
             }
-            println!("  {AQUA}tk w{RESET}                            Live dashboard auto-refresh (watches pane resize & task changes)");
+            println!(
+                "  {AQUA}tk w{RESET}                            Live dashboard auto-refresh (watches pane resize & task changes)"
+            );
         }
         Commands::Watch => {
             use std::io::{self, Write};
@@ -1561,7 +1797,17 @@ pub fn run() -> Result<()> {
             let is_mermaid = mermaid || id.as_deref() == Some("mermaid");
             let is_tree = tree
                 || id.as_deref() == Some("tree")
-                || (id.is_none() && needs.is_empty() && !is_mermaid && !is_dsm && !is_gantt && !is_aon && !is_cpm && !is_summary && !is_json && !is_timeline && !is_network);
+                || (id.is_none()
+                    && needs.is_empty()
+                    && !is_mermaid
+                    && !is_dsm
+                    && !is_gantt
+                    && !is_aon
+                    && !is_cpm
+                    && !is_summary
+                    && !is_json
+                    && !is_timeline
+                    && !is_network);
 
             if is_summary && !is_cpm && !is_json {
                 let all_cards = store.list_all()?;
@@ -1572,7 +1818,8 @@ pub fn run() -> Result<()> {
                 } else {
                     println!("\n{}", analysis.summary_long);
                 }
-            } else if is_cpm || (is_json && !is_dsm && !is_gantt && !is_aon && !is_mermaid && !tree) {
+            } else if is_cpm || (is_json && !is_dsm && !is_gantt && !is_aon && !is_mermaid && !tree)
+            {
                 let all_cards = store.list_all()?;
                 let analysis = crate::analytics::compute_cpm(&all_cards);
 
@@ -1581,7 +1828,9 @@ pub fn run() -> Result<()> {
                 } else {
                     let term_w = terminal_width();
                     println!("\n{BOLD}🎯 CRITICAL PATH & SCHEDULE ANALYSIS (CPM){RESET}");
-                    println!("{DIM}Mathematical schedule calculated from dependencies and durations.{RESET}\n");
+                    println!(
+                        "{DIM}Mathematical schedule calculated from dependencies and durations.{RESET}\n"
+                    );
 
                     if analysis.schedule.is_empty() {
                         println!("  {DIM}No tasks recorded.{RESET}\n");
@@ -1593,7 +1842,16 @@ pub fn run() -> Result<()> {
 
                         println!(
                             "  {BOLD_WHITE}{:<8} {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>6}  {:<21} {:<10} {:<10} Title{RESET}",
-                            "ID", "Dur", "ES", "EF", "LS", "LF", "Buffer", "Condition", "Owner", "Status"
+                            "ID",
+                            "Dur",
+                            "ES",
+                            "EF",
+                            "LS",
+                            "LF",
+                            "Buffer",
+                            "Condition",
+                            "Owner",
+                            "Status"
                         );
                         println!("  {div_line}");
 
@@ -1619,18 +1877,35 @@ pub fn run() -> Result<()> {
 
                             println!(
                                 "  {:<8} {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>6}  {} {:<10} {:<10} {}",
-                                t.id, t.duration_display, es_str, ef_str, ls_str, lf_str, t.buffer_display, cond_colored, owner_fmt, t.status, title_fmt
+                                t.id,
+                                t.duration_display,
+                                es_str,
+                                ef_str,
+                                ls_str,
+                                lf_str,
+                                t.buffer_display,
+                                cond_colored,
+                                owner_fmt,
+                                t.status,
+                                title_fmt
                             );
                         }
                         println!("  {div_line}");
-                        println!("\n  {BOLD}Project Duration:{RESET} {}", analysis.project_duration_display);
+                        println!(
+                            "\n  {BOLD}Project Duration:{RESET} {}",
+                            analysis.project_duration_display
+                        );
                         if !analysis.critical_path.is_empty() {
-                            println!("  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}", analysis.critical_path.join(" ➔ "));
+                            println!(
+                                "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
+                                analysis.critical_path.join(" ➔ ")
+                            );
                         }
                         let crit_count = analysis.schedule.iter().filter(|t| t.is_critical).count();
                         println!(
                             "  {BOLD}Summary:{RESET}          {} of {} tasks on critical path (zero buffer).\n",
-                            crit_count, analysis.schedule.len()
+                            crit_count,
+                            analysis.schedule.len()
                         );
                     } else if term_w >= 70 {
                         // TIER 2: Split-screen / Medium table (70..104 cols, ideal for 80-col panes)
@@ -1664,18 +1939,32 @@ pub fn run() -> Result<()> {
 
                             println!(
                                 "  {:<7} {:<5} {:<5} {:<5} {:<6} {} {:<8} {}",
-                                t.id, t.duration_display, es_str, ef_str, t.buffer_display, cond_colored, owner_fmt, title_fmt
+                                t.id,
+                                t.duration_display,
+                                es_str,
+                                ef_str,
+                                t.buffer_display,
+                                cond_colored,
+                                owner_fmt,
+                                title_fmt
                             );
                         }
                         println!("  {div_line}");
-                        println!("\n  {BOLD}Project Duration:{RESET} {}", analysis.project_duration_display);
+                        println!(
+                            "\n  {BOLD}Project Duration:{RESET} {}",
+                            analysis.project_duration_display
+                        );
                         if !analysis.critical_path.is_empty() {
-                            println!("  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}", analysis.critical_path.join(" ➔ "));
+                            println!(
+                                "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
+                                analysis.critical_path.join(" ➔ ")
+                            );
                         }
                         let crit_count = analysis.schedule.iter().filter(|t| t.is_critical).count();
                         println!(
                             "  {BOLD}Summary:{RESET}          {} of {} tasks on critical path (zero buffer).\n",
-                            crit_count, analysis.schedule.len()
+                            crit_count,
+                            analysis.schedule.len()
                         );
                     } else {
                         // TIER 3: Ultra-narrow table (< 70 cols)
@@ -1705,12 +1994,22 @@ pub fn run() -> Result<()> {
                             );
                         }
                         println!("  {div_line}");
-                        println!("\n  {BOLD}Duration:{RESET} {}", analysis.project_duration_display);
+                        println!(
+                            "\n  {BOLD}Duration:{RESET} {}",
+                            analysis.project_duration_display
+                        );
                         if !analysis.critical_path.is_empty() {
-                            println!("  {BOLD}Path:{RESET}     {BOLD}{RED}{}{RESET}", analysis.critical_path.join(" ➔ "));
+                            println!(
+                                "  {BOLD}Path:{RESET}     {BOLD}{RED}{}{RESET}",
+                                analysis.critical_path.join(" ➔ ")
+                            );
                         }
                         let crit_count = analysis.schedule.iter().filter(|t| t.is_critical).count();
-                        println!("  {BOLD}Summary:{RESET}  {}/{} critical\n", crit_count, analysis.schedule.len());
+                        println!(
+                            "  {BOLD}Summary:{RESET}  {}/{} critical\n",
+                            crit_count,
+                            analysis.schedule.len()
+                        );
                     }
 
                     if is_short {
@@ -1724,7 +2023,9 @@ pub fn run() -> Result<()> {
                 all_cards.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
 
                 println!("\n{BOLD}📐 DEPENDENCY STRUCTURE MATRIX (DSM){RESET}");
-                println!("{DIM}Read each ROW: \"This task needs Column [#] to complete first\"{RESET}\n");
+                println!(
+                    "{DIM}Read each ROW: \"This task needs Column [#] to complete first\"{RESET}\n"
+                );
 
                 let n = all_cards.len();
                 if n == 0 {
@@ -1733,8 +2034,11 @@ pub fn run() -> Result<()> {
                     let term_w = terminal_width();
                     let dsm_prefix_w = 12 + n * 3;
                     let dsm_status_w = 16;
-                    let dsm_title_w = term_w.saturating_sub(dsm_prefix_w + dsm_status_w + 4).max(10);
-                    let dsm_bar_w = (dsm_prefix_w + dsm_title_w + dsm_status_w).min(term_w.saturating_sub(4));
+                    let dsm_title_w = term_w
+                        .saturating_sub(dsm_prefix_w + dsm_status_w + 4)
+                        .max(10);
+                    let dsm_bar_w =
+                        (dsm_prefix_w + dsm_title_w + dsm_status_w).min(term_w.saturating_sub(4));
                     let dsm_div = "─".repeat(dsm_bar_w);
 
                     print!("  {BOLD_WHITE}#   ID     {RESET}");
@@ -1751,9 +2055,19 @@ pub fn run() -> Result<()> {
                         for (j, col_card) in all_cards.iter().enumerate() {
                             if i == j {
                                 print!("  {DIM}·{RESET}");
-                            } else if row_card.meta.blocked_by.iter().any(|b| b.eq_ignore_ascii_case(&col_card.meta.id)) {
+                            } else if row_card
+                                .meta
+                                .blocked_by
+                                .iter()
+                                .any(|b| b.eq_ignore_ascii_case(&col_card.meta.id))
+                            {
                                 if j > i {
-                                    circular_deadlocks.push((row_card.meta.id.clone(), col_card.meta.id.clone(), i + 1, j + 1));
+                                    circular_deadlocks.push((
+                                        row_card.meta.id.clone(),
+                                        col_card.meta.id.clone(),
+                                        i + 1,
+                                        j + 1,
+                                    ));
                                     print!("  {BOLD}{RED}X{RESET}");
                                 } else {
                                     print!("  {BOLD}{AQUA}X{RESET}");
@@ -1767,14 +2081,23 @@ pub fn run() -> Result<()> {
                     }
                     println!("  {dsm_div}");
 
-                    println!("  {DIM}Legend: {BOLD}{AQUA}X{RESET} = Normal prerequisite (row waits on earlier column) | {DIM}·{RESET} = Self{RESET}");
+                    println!(
+                        "  {DIM}Legend: {BOLD}{AQUA}X{RESET} = Normal prerequisite (row waits on earlier column) | {DIM}·{RESET} = Self{RESET}"
+                    );
 
                     if circular_deadlocks.is_empty() {
-                        println!("  {GREEN}✓ Clean Execution Order:{RESET} No circular dependencies or deadlocks detected.");
+                        println!(
+                            "  {GREEN}✓ Clean Execution Order:{RESET} No circular dependencies or deadlocks detected."
+                        );
                     } else {
-                        println!("  {RED}⚠️  Circular Deadlocks Detected (Task waits on a later task):{RESET}");
+                        println!(
+                            "  {RED}⚠️  Circular Deadlocks Detected (Task waits on a later task):{RESET}"
+                        );
                         for (r_id, c_id, r_num, c_num) in circular_deadlocks {
-                            println!("    • Row {} ({}) waits on future Column {} ({})", r_num, r_id, c_num, c_id);
+                            println!(
+                                "    • Row {} ({}) waits on future Column {} ({})",
+                                r_num, r_id, c_num, c_id
+                            );
                         }
                     }
                 }
@@ -1788,7 +2111,8 @@ pub fn run() -> Result<()> {
                 let all_cards = store.list_all()?;
                 let today = chrono::Local::now().format("%Y-%m-%d").to_string();
                 let analysis = crate::analytics::compute_cpm(&all_cards);
-                let crit_set: std::collections::HashSet<_> = analysis.critical_path.into_iter().collect();
+                let crit_set: std::collections::HashSet<_> =
+                    analysis.critical_path.into_iter().collect();
 
                 println!("```mermaid");
                 println!("gantt");
@@ -1804,36 +2128,64 @@ pub fn run() -> Result<()> {
                     TaskStatus::Inbox,
                     TaskStatus::Done,
                 ] {
-                    let matching: Vec<&TaskCard> = all_cards.iter().filter(|c| &c.meta.status == status).collect();
+                    let matching: Vec<&TaskCard> = all_cards
+                        .iter()
+                        .filter(|c| &c.meta.status == status)
+                        .collect();
                     if !matching.is_empty() {
                         println!("    section {}", status.as_str());
                         for c in matching {
                             let is_crit = crit_set.contains(&c.meta.id);
                             let safe_id = c.meta.id.replace('-', "_");
                             let safe_title = c.meta.title.replace(':', " -").replace('"', "'");
-                            let start_date = if c.meta.created.is_empty() { &today } else { &c.meta.created };
+                            let start_date = if c.meta.created.is_empty() {
+                                &today
+                            } else {
+                                &c.meta.created
+                            };
                             let end_date = c.meta.due.as_deref().unwrap_or(&today);
 
                             match c.meta.status {
                                 TaskStatus::Done => {
                                     let tag = if is_crit { ":crit, done" } else { ":done" };
-                                    println!("    {} {}, {}, {}, {}", safe_title, tag, safe_id, start_date, end_date);
+                                    println!(
+                                        "    {} {}, {}, {}, {}",
+                                        safe_title, tag, safe_id, start_date, end_date
+                                    );
                                 }
                                 TaskStatus::InProgress | TaskStatus::PendingClose => {
                                     let tag = if is_crit { ":crit, active" } else { ":active" };
-                                    println!("    {} {}, {}, {}, {}", safe_title, tag, safe_id, start_date, end_date);
+                                    println!(
+                                        "    {} {}, {}, {}, {}",
+                                        safe_title, tag, safe_id, start_date, end_date
+                                    );
                                 }
                                 TaskStatus::Blocked => {
                                     if !c.meta.blocked_by.is_empty() {
-                                        let blockers = c.meta.blocked_by.iter().map(|b| b.replace('-', "_")).collect::<Vec<_>>().join(" ");
-                                        println!("    {} :crit, {}, after {}, 1d", safe_title, safe_id, blockers);
+                                        let blockers = c
+                                            .meta
+                                            .blocked_by
+                                            .iter()
+                                            .map(|b| b.replace('-', "_"))
+                                            .collect::<Vec<_>>()
+                                            .join(" ");
+                                        println!(
+                                            "    {} :crit, {}, after {}, 1d",
+                                            safe_title, safe_id, blockers
+                                        );
                                     } else {
-                                        println!("    {} :crit, {}, {}, 1d", safe_title, safe_id, start_date);
+                                        println!(
+                                            "    {} :crit, {}, {}, 1d",
+                                            safe_title, safe_id, start_date
+                                        );
                                     }
                                 }
                                 _ => {
                                     let tag = if is_crit { ":crit" } else { ":active" };
-                                    println!("    {} {}, {}, {}, 1d", safe_title, tag, safe_id, start_date);
+                                    println!(
+                                        "    {} {}, {}, {}, 1d",
+                                        safe_title, tag, safe_id, start_date
+                                    );
                                 }
                             }
                         }
@@ -1851,12 +2203,24 @@ pub fn run() -> Result<()> {
 
                 println!("```mermaid");
                 println!("graph LR");
-                println!("    classDef critical fill:#fee2e2,stroke:#ef4444,stroke-width:2.5px,color:#991b1b;");
-                println!("    classDef criticalReview fill:#fae8ff,stroke:#c026d3,stroke-width:2.5px,color:#701a75;");
-                println!("    classDef blocked fill:#fef2f2,stroke:#dc2626,stroke-width:2px,stroke-dasharray: 4 4,color:#991b1b;");
-                println!("    classDef done fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d;");
-                println!("    classDef inprogress fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f;");
-                println!("    classDef noncritical fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,color:#1e293b;\n");
+                println!(
+                    "    classDef critical fill:#fee2e2,stroke:#ef4444,stroke-width:2.5px,color:#991b1b;"
+                );
+                println!(
+                    "    classDef criticalReview fill:#fae8ff,stroke:#c026d3,stroke-width:2.5px,color:#701a75;"
+                );
+                println!(
+                    "    classDef blocked fill:#fef2f2,stroke:#dc2626,stroke-width:2px,stroke-dasharray: 4 4,color:#991b1b;"
+                );
+                println!(
+                    "    classDef done fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d;"
+                );
+                println!(
+                    "    classDef inprogress fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f;"
+                );
+                println!(
+                    "    classDef noncritical fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,color:#1e293b;\n"
+                );
 
                 for t in &analysis.schedule {
                     let safe_id = t.id.replace('-', "_");
@@ -1882,12 +2246,23 @@ pub fn run() -> Result<()> {
                     let ef_str = crate::analytics::format_duration_concise(t.early_finish);
                     println!(
                         "    {}[\"<b>{}</b>{}<br>{}<br><i>d: {} | ES: {} · EF: {} | Buffer: {}</i><br><small>@{} · {}</small>\"]{}",
-                        safe_id, t.id, crit_badge, safe_title, t.duration_display, es_str, ef_str, t.buffer_display, t.owner, t.status, class_tag
+                        safe_id,
+                        t.id,
+                        crit_badge,
+                        safe_title,
+                        t.duration_display,
+                        es_str,
+                        ef_str,
+                        t.buffer_display,
+                        t.owner,
+                        t.status,
+                        class_tag
                     );
                 }
 
                 println!();
-                let sched_map: std::collections::HashMap<_, _> = analysis.schedule.iter().map(|s| (&s.id, s)).collect();
+                let sched_map: std::collections::HashMap<_, _> =
+                    analysis.schedule.iter().map(|s| (&s.id, s)).collect();
                 for t in &analysis.schedule {
                     let target_id = t.id.replace('-', "_");
                     for bid in &t.blocked_by {
@@ -1908,8 +2283,14 @@ pub fn run() -> Result<()> {
                 println!("```");
 
                 if !analysis.critical_path.is_empty() {
-                    println!("\n{BOLD}🎯 Critical Path ({} project duration, 0s buffer):{RESET}", analysis.project_duration_display);
-                    println!("  {BOLD}{RED}{}{RESET}\n", analysis.critical_path.join(" ➔ "));
+                    println!(
+                        "\n{BOLD}🎯 Critical Path ({} project duration, 0s buffer):{RESET}",
+                        analysis.project_duration_display
+                    );
+                    println!(
+                        "  {BOLD}{RED}{}{RESET}\n",
+                        analysis.critical_path.join(" ➔ ")
+                    );
                 }
             } else if is_mermaid {
                 let all_cards = store.list_all()?;
@@ -1925,13 +2306,27 @@ pub fn run() -> Result<()> {
 
                 println!("```mermaid");
                 println!("graph TD");
-                println!("    classDef ready fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0369a1;");
-                println!("    classDef inprogress fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#b45309;");
-                println!("    classDef pendingclose fill:#f3e8ff,stroke:#9333ea,stroke-width:2px,color:#7e22ce;");
-                println!("    classDef blocked fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#b91c1c;");
-                println!("    classDef done fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#15803d;");
-                println!("    classDef inbox fill:#f1f5f9,stroke:#64748b,stroke-width:2px,color:#475569;");
-                println!("    classDef archived fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,color:#64748b;\n");
+                println!(
+                    "    classDef ready fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0369a1;"
+                );
+                println!(
+                    "    classDef inprogress fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#b45309;"
+                );
+                println!(
+                    "    classDef pendingclose fill:#f3e8ff,stroke:#9333ea,stroke-width:2px,color:#7e22ce;"
+                );
+                println!(
+                    "    classDef blocked fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#b91c1c;"
+                );
+                println!(
+                    "    classDef done fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#15803d;"
+                );
+                println!(
+                    "    classDef inbox fill:#f1f5f9,stroke:#64748b,stroke-width:2px,color:#475569;"
+                );
+                println!(
+                    "    classDef archived fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,color:#64748b;\n"
+                );
 
                 for nid in &node_ids {
                     let safe_id = nid.replace('-', "_");
@@ -1947,7 +2342,10 @@ pub fn run() -> Result<()> {
                             TaskStatus::Inbox => ":::inbox",
                             TaskStatus::Archived => ":::archived",
                         };
-                        println!("    {}[\"{} [{}]: {}\"]{}", safe_id, c.meta.id, status_str, safe_title, class_tag);
+                        println!(
+                            "    {}[\"{} [{}]: {}\"]{}",
+                            safe_id, c.meta.id, status_str, safe_title, class_tag
+                        );
                     } else {
                         println!("    {}[\"{}\"]", safe_id, nid);
                     }
@@ -1969,10 +2367,16 @@ pub fn run() -> Result<()> {
                     if card.meta.blocked_by.is_empty() {
                         println!("  {DIM}None (unblocked){RESET}");
                     } else {
-                        println!("  {RED}Blocked by:{RESET} {}", card.meta.blocked_by.join(", "));
+                        println!(
+                            "  {RED}Blocked by:{RESET} {}",
+                            card.meta.blocked_by.join(", ")
+                        );
                     }
                     if !card.meta.blocks.is_empty() {
-                        println!("  {AQUA}Blocks downstream:{RESET} {}", card.meta.blocks.join(", "));
+                        println!(
+                            "  {AQUA}Blocks downstream:{RESET} {}",
+                            card.meta.blocks.join(", ")
+                        );
                     }
                 } else {
                     let updated = store.add_dependency(&dep_id, &needs)?;
@@ -1983,6 +2387,68 @@ pub fn run() -> Result<()> {
                         color_status(&updated.meta.status).trim()
                     );
                 }
+            }
+        }
+        Commands::Doctor => {
+            let issues = store.integrity_report()?;
+            if issues.is_empty() {
+                println!("{GREEN}✓ Every card matches the event log{RESET}");
+            } else {
+                for i in &issues {
+                    println!("{RED}✖{RESET} {}", i);
+                }
+                anyhow::bail!("{} integrity issue(s)", issues.len());
+            }
+        }
+        Commands::Auto { ids, off } => {
+            let cards = ids
+                .iter()
+                .map(|id| store.find_task(id))
+                .collect::<Result<Vec<_>>>()?;
+            if off {
+                for c in &cards {
+                    store.revoke_eval_approval(&c.meta.id)?;
+                    println!(
+                        "{ORANGE}⏸ Auto-accept off{RESET} {BOLD}{}{RESET}: manual sign-off",
+                        c.meta.id
+                    );
+                }
+                return Ok(());
+            }
+            let approval = if is_interactive() {
+                let mut err = std::io::stderr();
+                use std::io::Write;
+                writeln!(
+                    err,
+                    "{BOLD}Auto-accept ({} task(s)):{RESET} each closes itself when this check passes",
+                    cards.len()
+                )?;
+                for c in &cards {
+                    writeln!(
+                        err,
+                        "  {BOLD}{}{RESET} {}: `{}`",
+                        c.meta.id,
+                        c.meta.title,
+                        c.meta
+                            .eval
+                            .as_deref()
+                            .unwrap_or("(no eval: cannot auto-accept)")
+                    )?;
+                }
+                if !confirm("Approve these checks?")? {
+                    anyhow::bail!("Not approved: nothing changed");
+                }
+                Approval::Interactive
+            } else {
+                Approval::Untrusted
+            };
+            for c in &cards {
+                let card = store.approve_eval(&c.meta.id, approval)?;
+                println!(
+                    "{GREEN}⚡ Auto-accept on{RESET} {BOLD}{}{RESET}: closes when `{}` passes",
+                    card.meta.id,
+                    card.meta.approved_eval.as_deref().unwrap_or("")
+                );
             }
         }
         Commands::Archive { id } => {
@@ -1997,13 +2463,17 @@ pub fn run() -> Result<()> {
                 for tid in &archived {
                     println!("  • {BOLD}{}{RESET}", tid);
                 }
-                println!("  {DIM}(Full lifecycle metrics preserved in .events.jsonl for `tk st` & DuckDB){RESET}");
+                println!(
+                    "  {DIM}(Full lifecycle metrics preserved in .events.jsonl for `tk st` & DuckDB){RESET}"
+                );
             }
         }
         Commands::Prune { id, force } => {
             if !force {
                 use std::io::{self, Write};
-                print!("Are you sure you want to prune completed task notes from active disk? [y/N]: ");
+                print!(
+                    "Are you sure you want to prune completed task notes from active disk? [y/N]: "
+                );
                 io::stdout().flush()?;
                 let mut resp = String::new();
                 io::stdin().read_line(&mut resp)?;
@@ -2023,7 +2493,9 @@ pub fn run() -> Result<()> {
                 for tid in &pruned {
                     println!("  • {DIM}{}{RESET}", tid);
                 }
-                println!("  {GREEN}✅ Database .events.jsonl is 100% intact — all historical telemetry remains accessible!{RESET}");
+                println!(
+                    "  {GREEN}✅ Database .events.jsonl is 100% intact — all historical telemetry remains accessible!{RESET}"
+                );
             }
         }
         Commands::Hook { event, owner } => {
@@ -2118,15 +2590,40 @@ pub fn run() -> Result<()> {
         Commands::Banner => {
             let cyan = "\x1b[38;2;56;189;248m";
             let coral = "\x1b[38;2;244;63;94m";
-            println!("\n{}{BOLD}  ████████╗██╗  ██╗{}{BOLD}███╗   ███╗██████╗ {RESET}", cyan, coral);
-            println!("{}{BOLD}  ╚══██╔══╝██║ ██╔╝{}{BOLD}████╗ ████║██╔══██╗{RESET}", cyan, coral);
-            println!("{}{BOLD}     ██║   █████═╝ {}{BOLD}██╔████╔██║██║  ██║{RESET}", cyan, coral);
-            println!("{}{BOLD}     ██║   ██╔═██╗ {}{BOLD}██║╚██╔╝██║██║  ██║{RESET}", cyan, coral);
-            println!("{}{BOLD}     ██║   ██║ ╚██╗{}{BOLD}██║ ╚═╝ ██║██████╔╝{RESET}", cyan, coral);
-            println!("{}{BOLD}     ╚═╝   ╚═╝  ╚═╝{}{BOLD}╚═╝     ╚═╝╚═════╝ {RESET}\n", cyan, coral);
-            println!("  {BOLD}tkmd{RESET} {DIM}v{}{RESET} • {BOLD}{BLUE}Deterministic Program Management Engine & Multi-Agent MCP Server{RESET}", env!("CARGO_PKG_VERSION"));
-            println!("  {DIM}Zero daemons • 100% local • Mathematical CPM & DSM • Universal Stdio MCP{RESET}");
-            println!("  {DIM}Dual Licensed:{RESET} {GREEN}MIT OR Apache-2.0{RESET} • Copyright (c) 2026 Ken Harrison\n");
+            println!(
+                "\n{}{BOLD}  ████████╗██╗  ██╗{}{BOLD}███╗   ███╗██████╗ {RESET}",
+                cyan, coral
+            );
+            println!(
+                "{}{BOLD}  ╚══██╔══╝██║ ██╔╝{}{BOLD}████╗ ████║██╔══██╗{RESET}",
+                cyan, coral
+            );
+            println!(
+                "{}{BOLD}     ██║   █████═╝ {}{BOLD}██╔████╔██║██║  ██║{RESET}",
+                cyan, coral
+            );
+            println!(
+                "{}{BOLD}     ██║   ██╔═██╗ {}{BOLD}██║╚██╔╝██║██║  ██║{RESET}",
+                cyan, coral
+            );
+            println!(
+                "{}{BOLD}     ██║   ██║ ╚██╗{}{BOLD}██║ ╚═╝ ██║██████╔╝{RESET}",
+                cyan, coral
+            );
+            println!(
+                "{}{BOLD}     ╚═╝   ╚═╝  ╚═╝{}{BOLD}╚═╝     ╚═╝╚═════╝ {RESET}\n",
+                cyan, coral
+            );
+            println!(
+                "  {BOLD}tkmd{RESET} {DIM}v{}{RESET} • {BOLD}{BLUE}Deterministic Program Management Engine & Multi-Agent MCP Server{RESET}",
+                env!("CARGO_PKG_VERSION")
+            );
+            println!(
+                "  {DIM}Zero daemons • 100% local • Mathematical CPM & DSM • Universal Stdio MCP{RESET}"
+            );
+            println!(
+                "  {DIM}Dual Licensed:{RESET} {GREEN}MIT OR Apache-2.0{RESET} • Copyright (c) 2026 Ken Harrison\n"
+            );
         }
         Commands::Completions { .. } => unreachable!(),
     }
@@ -2134,16 +2631,21 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn render_dependency_tree(store: &TaskStore, target_id: Option<&str>, project: Option<&str>) -> anyhow::Result<()> {
+fn render_dependency_tree(
+    store: &TaskStore,
+    target_id: Option<&str>,
+    project: Option<&str>,
+) -> anyhow::Result<()> {
     let all_cards = store.list_all()?;
     println!("\n{BOLD}🌲 TASK DEPENDENCY DAG{RESET}");
     println!("{DIM}────────────────────────────────────────────{RESET}");
     let mut has_deps = false;
     for c in &all_cards {
         if let Some(p) = project
-            && c.meta.project.as_deref() != Some(p) {
-                continue;
-            }
+            && c.meta.project.as_deref() != Some(p)
+        {
+            continue;
+        }
         if let Some(tid) = target_id {
             let clean_tid = tid.trim_start_matches("tk-").trim_start_matches('0');
             let clean_cid = c.meta.id.trim_start_matches("tk-").trim_start_matches('0');
@@ -2180,6 +2682,136 @@ fn render_dependency_tree(store: &TaskStore, target_id: Option<&str>, project: O
     Ok(())
 }
 
+/// Resolve `tk done` targets: the given ids, or every `pending-close` task with `--pending`.
+/// With `--pending`, a global card whose id also exists locally is skipped, because `find_task`
+/// would resolve that id to the local card.
+fn done_targets(store: &TaskStore, ids: &[String], pending: bool) -> Result<Vec<TaskCard>> {
+    let mut cards: Vec<TaskCard> = Vec::new();
+    for id in ids {
+        let card = store.find_task(id)?;
+        // `1`, `tk-1` and `tk-001` are the same task: process it once.
+        if !cards.iter().any(|c| c.path == card.path) {
+            cards.push(card);
+        }
+    }
+    if pending {
+        let local = store.list_store_cards()?;
+        let local_ids: Vec<String> = local.iter().map(|c| c.meta.id.to_lowercase()).collect();
+        let mut candidates = local;
+        if matches!(
+            store.active_scope,
+            ScopeSelection::Auto | ScopeSelection::All
+        ) && let Some(peer) = store.peer.as_ref()
+        {
+            for c in peer.list_store_cards()? {
+                if !local_ids.contains(&c.meta.id.to_lowercase()) {
+                    candidates.push(c);
+                } else if c.meta.status == TaskStatus::PendingClose {
+                    eprintln!(
+                        "warning: skipped global {} ({}): a local task has the same id. Close it with `tk d -G {}`",
+                        c.meta.id, c.meta.title, c.meta.id
+                    );
+                }
+            }
+        }
+        for c in candidates {
+            if c.meta.status == TaskStatus::PendingClose && !cards.iter().any(|x| x.path == c.path)
+            {
+                cards.push(c);
+            }
+        }
+    }
+    Ok(cards)
+}
+
+/// Decide how `tk done` may approve. A person must be at an interactive terminal (stdin and
+/// stderr are TTYs); agents, pipes and scripts get `Untrusted`, which can only submit for review.
+/// Several tasks are summarised together and confirmed with one answer.
+/// Limitation: an agent that allocates its own pseudo-terminal passes the TTY check. This is a
+/// workflow harness, not authentication.
+fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
+    use std::io::Write;
+    if !is_interactive() {
+        return Ok(Approval::Untrusted);
+    }
+    // Only cards that would actually close need sign-off; agent-owned work is routed to review.
+    let closing: Vec<&TaskCard> = cards
+        .iter()
+        .filter(|c| {
+            c.meta.status == TaskStatus::PendingClose
+                || c.meta
+                    .owner
+                    .eq_ignore_ascii_case(&store.config.default_owner)
+        })
+        .collect();
+    if closing.is_empty() {
+        return Ok(Approval::Interactive);
+    }
+
+    let mut err = std::io::stderr();
+    writeln!(err, "{BOLD}Sign-off ({} task(s)):{RESET}", closing.len())?;
+    for card in &closing {
+        writeln!(
+            err,
+            "  {BOLD}{}{RESET} {} (@{}, {})",
+            card.meta.id,
+            card.meta.title,
+            card.meta.owner,
+            card.meta.status.as_str()
+        )?;
+        if let Some(r) = &card.meta.receipt {
+            writeln!(
+                err,
+                "      submitted by {} at {}; eval: {}; snapshot: {}",
+                r.submitted_by,
+                r.submitted_at,
+                r.eval.as_deref().unwrap_or("none"),
+                r.snapshot
+                    .as_deref()
+                    .map(|s| &s[..s.len().min(12)])
+                    .unwrap_or("not checked (not a git repo)")
+            )?;
+            if r.eval_result == "no-eval" {
+                writeln!(err, "      {ORANGE}warning:{RESET} no automated check ran")?;
+            }
+        }
+        if card.meta.receipt.is_some() && card.meta.claimed_eval != card.meta.eval {
+            writeln!(
+                err,
+                "      {ORANGE}warning:{RESET} eval changed after claim: `{}` -> `{}`",
+                card.meta.claimed_eval.as_deref().unwrap_or("none"),
+                card.meta.eval.as_deref().unwrap_or("none")
+            )?;
+        }
+    }
+    let target = if closing.len() == 1 {
+        closing[0].meta.id.clone()
+    } else {
+        format!("all {}", closing.len())
+    };
+    if !confirm(&format!("Approve and close {}?", target))? {
+        anyhow::bail!("Not approved: nothing closed");
+    }
+    Ok(Approval::Interactive)
+}
+
+/// A person is at the keyboard: stdin and stderr are both terminals.
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Ask a yes/no question on stderr; only `y`/`yes` counts as yes.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::{BufRead, Write};
+    let mut err = std::io::stderr();
+    write!(err, "{} [y/N] ", question)?;
+    err.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
 /// Message for `tk done`. Says `Completed` only when the card is actually done.
 /// Agent completions stop at `pending-close` and wait for human sign-off.
 fn done_message(status: &TaskStatus, id: &str, title: &str) -> String {
@@ -2190,7 +2822,7 @@ fn done_message(status: &TaskStatus, id: &str, title: &str) -> String {
         )
     } else {
         format!(
-            "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` (eval passed): {}. Human sign-off is next.",
+            "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close`: {}. Human sign-off is next.",
             id, title
         )
     }
@@ -2276,12 +2908,20 @@ mod tests {
 
     #[test]
     fn test_cli_parse_claim_and_resume() {
-        let cli_claim = Cli::try_parse_from(["tk", "c", "1", "--owner", "claude", "-s", "claude -r 999"]).unwrap();
+        let cli_claim =
+            Cli::try_parse_from(["tk", "c", "1", "--owner", "claude", "-s", "claude -r 999"])
+                .unwrap();
         match cli_claim.command {
-            Some(Commands::Claim { id, owner, session }) => {
+            Some(Commands::Claim {
+                id,
+                owner,
+                session,
+                force,
+            }) => {
                 assert_eq!(id, "1");
-                assert_eq!(owner, "claude");
+                assert_eq!(owner.as_deref(), Some("claude"));
                 assert_eq!(session.as_deref(), Some("claude -r 999"));
+                assert!(!force);
             }
             other => panic!("Expected Claim, got {:?}", other),
         }
@@ -2291,6 +2931,81 @@ mod tests {
             Some(Commands::Resume { id, .. }) => assert_eq!(id, "1"),
             other => panic!("Expected Resume, got {:?}", other),
         }
+    }
+
+    /// RED (Sourcery #22): the same task given twice (or by two aliases) was processed twice.
+    #[test]
+    fn test_done_targets_dedupes_ids() {
+        let tmp = std::env::temp_dir().join(format!("tkmd-lib-dedupe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("tasks")).unwrap();
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: store::AppConfig {
+                mode: "cli".into(),
+                vault_path: tmp.to_string_lossy().to_string(),
+                tasks_dir: "tasks".into(),
+                base_file: String::new(),
+                daily_dir: String::new(),
+                default_owner: "ken".into(),
+                obsidian_vault_name: None,
+                editor: None,
+                policy: store::Policy::default(),
+            },
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
+            is_uninitialized_local: false,
+        };
+        store.add_task("p1 once", None, vec![], None, None).unwrap();
+        let ids: Vec<String> = ["1", "tk-001", "tk-1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(done_targets(&store, &ids, false).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_cli_parse_auto() {
+        match Cli::try_parse_from(["tk", "auto", "1", "2"])
+            .unwrap()
+            .command
+        {
+            Some(Commands::Auto { ids, off }) => {
+                assert_eq!(ids, vec!["1", "2"]);
+                assert!(!off);
+            }
+            other => panic!("Expected Auto, got {:?}", other),
+        }
+        assert!(Cli::try_parse_from(["tk", "auto"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_bulk_done() {
+        match Cli::try_parse_from(["tk", "d", "1", "2", "tk-003"])
+            .unwrap()
+            .command
+        {
+            Some(Commands::Done { ids, pending, .. }) => {
+                assert_eq!(ids, vec!["1", "2", "tk-003"]);
+                assert!(!pending);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+        match Cli::try_parse_from(["tk", "d", "--pending"])
+            .unwrap()
+            .command
+        {
+            Some(Commands::Done { ids, pending, .. }) => {
+                assert!(ids.is_empty());
+                assert!(pending);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+        assert!(Cli::try_parse_from(["tk", "d"]).is_err());
     }
 
     #[test]

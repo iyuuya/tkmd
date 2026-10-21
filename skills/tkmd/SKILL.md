@@ -34,7 +34,11 @@ All active tasks live as atomic Markdown cards in `tasks/tk-XXX-*.md` (and rende
    ```
 5. **Submit for Sign-Off (`status: pending-close`)**:
    - **CRITICAL RULE**: AI agents **MUST NOT** mark tasks as `done` (`tk d`). Agents **MUST** submit finished work to `pending-close` using `tk r` (`tk review`) once `tk eval` passes.
-   - Even if an agent calls `tk d --actor <agent>` or MCP `task_complete`, `tk`'s built-in guardrail hook automatically intercepts non-human actors and routes the task to `pending-close`.
+   - `tk d` and MCP `task_complete` from an agent route the task to `pending-close`; on a task already in `pending-close` they fail. Passing `--actor <owner>` does not change this: sign-off needs a person at a terminal.
+   - Do not claim a task another owner is working on. `tk c` refuses it; use `--force` only when the human asks you to take it over.
+   - Do not change a task's `eval` to make it pass. Changing `eval` invalidates the review, revokes any auto-accept, and the human sees the change.
+   - For routine work with a good check, ask the human to run `tk auto <id>`: then your passing submit closes the task with no sign-off wait. You cannot turn auto-accept on yourself.
+   - Only the task's owner can submit claimed work. Use ids (`tk r 7`), not name fragments: an ambiguous fragment is an error listing the matches.
    ```bash
    tk r 1 -a <agent-name> -s "<session-id>" -n "Summary of changes and [[artifact-wikilink]]"
    ```
@@ -57,6 +61,8 @@ All active tasks live as atomic Markdown cards in `tasks/tk-XXX-*.md` (and rende
    tk dep --aon           # Outputs Activity-on-Node (AON) CPM network diagram
    tk dep --mermaid       # Outputs standard Mermaid flowchart
    ```
+   - **MCP `task_list` / `task_get`**: list returns `{tasks, total, next_offset}` with compact summaries, 100 per page; pass `offset` for the next page, and call `task_get` for the one card you will work on instead of `detail: "full"`.
+   - Never edit task cards or `.events.jsonl` directly: `tk doctor` flags state the event log does not explain.
    - **MCP Tool `task_cpm`**: AI agents can query project duration, critical path sequences, and task schedule buffers directly without diagrams or shell execution.
    - In `todo.txt` syntax, tasks can declare dependencies with `needs:1,2`, `after:1,2`, or `dep:1,2`.
    - Blocked tasks cannot be claimed (`claim` guardrail).

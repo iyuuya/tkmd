@@ -1,3 +1,4 @@
+use crate::ansi::Ansi;
 use crate::model::{TaskCard, TaskStatus};
 use crate::store::TaskStore;
 use anyhow::Result;
@@ -47,15 +48,15 @@ pub struct CpmAnalysis {
     pub schedule: Vec<CpmTaskSchedule>,
 }
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const BOLD_WHITE: &str = "\x1b[1;97m";
-const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[38;2;224;108;117m";
-const ORANGE: &str = "\x1b[38;2;254;128;25m";
-const AQUA: &str = "\x1b[38;2;86;182;194m";
-const GREEN: &str = "\x1b[38;2;152;195;121m";
-const PURPLE: &str = "\x1b[38;2;198;120;221m";
+const RESET: Ansi = Ansi("\x1b[0m");
+const BOLD: Ansi = Ansi("\x1b[1m");
+const BOLD_WHITE: Ansi = Ansi("\x1b[1;97m");
+const DIM: Ansi = Ansi("\x1b[2m");
+const RED: Ansi = Ansi("\x1b[38;2;224;108;117m");
+const ORANGE: Ansi = Ansi("\x1b[38;2;254;128;25m");
+const AQUA: Ansi = Ansi("\x1b[38;2;86;182;194m");
+const GREEN: Ansi = Ansi("\x1b[38;2;152;195;121m");
+const PURPLE: Ansi = Ansi("\x1b[38;2;198;120;221m");
 
 pub fn format_duration_secs(secs: i64) -> String {
     let s = secs.max(0);
@@ -80,17 +81,19 @@ pub fn parse_duration_seconds(raw: &str) -> Option<u64> {
     } else if let Some(rest) = s.strip_suffix('m') {
         rest.parse::<f64>().ok().map(|m| (m * 60.0).round() as u64)
     } else if let Some(rest) = s.strip_suffix('h') {
-        rest.parse::<f64>().ok().map(|h| (h * 3600.0).round() as u64)
+        rest.parse::<f64>()
+            .ok()
+            .map(|h| (h * 3600.0).round() as u64)
     } else if let Some(rest) = s.strip_suffix('d') {
-        rest.parse::<f64>().ok().map(|d| (d * 86400.0).round() as u64)
+        rest.parse::<f64>()
+            .ok()
+            .map(|d| (d * 86400.0).round() as u64)
     } else if let Some(rest) = s.strip_suffix('w') {
-        rest.parse::<f64>().ok().map(|w| (w * 604800.0).round() as u64)
+        rest.parse::<f64>()
+            .ok()
+            .map(|w| (w * 604800.0).round() as u64)
     } else if let Ok(n) = s.parse::<u64>() {
-        if n <= 365 {
-            Some(n * 86400)
-        } else {
-            Some(n)
-        }
+        if n <= 365 { Some(n * 86400) } else { Some(n) }
     } else {
         None
     }
@@ -303,7 +306,10 @@ pub fn print_stats(store: &TaskStore, term_w: usize) -> Result<()> {
         if !c.meta.dod.is_empty() {
             with_dod += 1;
         }
-        if !c.meta.owner.eq_ignore_ascii_case(&store.config.default_owner)
+        if !c
+            .meta
+            .owner
+            .eq_ignore_ascii_case(&store.config.default_owner)
             && c.meta.session_id.is_none()
         {
             agent_without_session += 1;
@@ -501,7 +507,10 @@ pub fn print_stats(store: &TaskStore, term_w: usize) -> Result<()> {
 
     // Section 2: Durations & Wait Times (Little's Law: L = λW)
     println!("\n{BOLD}2. Flow & Queueing Timings (Little's Law: L = λW · Wall-Clock){RESET}");
-    println!("   • {DIM}Little's Law Model:{RESET}         {BOLD}{AQUA}{}{RESET}", littles_law_str);
+    println!(
+        "   • {DIM}Little's Law Model:{RESET}         {BOLD}{AQUA}{}{RESET}",
+        littles_law_str
+    );
     println!(
         "   • {BOLD}Queue Wait{RESET} (`ready` → `claimed`):         mean {AQUA}{avg_queue_wait}{RESET}"
     );
@@ -718,8 +727,10 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
         duration_map.insert(id.clone(), secs);
     }
 
-    let mut preds: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let mut succs: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut preds: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut succs: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for id in &node_ids {
         preds.entry(id.clone()).or_default();
         succs.entry(id.clone()).or_default();
@@ -813,7 +824,13 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
                 c.meta.blocked_by.clone(),
             )
         } else {
-            (id.clone(), "unknown".to_string(), "unknown".to_string(), None, vec![])
+            (
+                id.clone(),
+                "unknown".to_string(),
+                "unknown".to_string(),
+                None,
+                vec![],
+            )
         };
 
         schedule.push(CpmTaskSchedule {
@@ -846,8 +863,10 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
     let project_duration_display = format_duration_concise(total_project_duration_secs);
     let project_duration_days = (total_project_duration_secs / 86400).max(1) as u32;
 
-    let summary_short = generate_cpm_summary_short(&project_duration_display, &critical_path, &schedule);
-    let summary_long = generate_cpm_summary_long(&project_duration_display, &critical_path, &schedule);
+    let summary_short =
+        generate_cpm_summary_short(&project_duration_display, &critical_path, &schedule);
+    let summary_long =
+        generate_cpm_summary_long(&project_duration_display, &critical_path, &schedule);
 
     CpmAnalysis {
         project_duration_seconds: total_project_duration_secs,
@@ -860,7 +879,11 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
     }
 }
 
-pub fn generate_cpm_summary_short(duration: &str, critical_path: &[String], schedule: &[CpmTaskSchedule]) -> String {
+pub fn generate_cpm_summary_short(
+    duration: &str,
+    critical_path: &[String],
+    schedule: &[CpmTaskSchedule],
+) -> String {
     if schedule.is_empty() {
         return "No tasks recorded. The project schedule is empty.".to_string();
     }
@@ -896,32 +919,47 @@ pub fn generate_cpm_summary_short(duration: &str, critical_path: &[String], sche
     summary
 }
 
-pub fn generate_cpm_summary_long(duration: &str, critical_path: &[String], schedule: &[CpmTaskSchedule]) -> String {
+pub fn generate_cpm_summary_long(
+    duration: &str,
+    critical_path: &[String],
+    schedule: &[CpmTaskSchedule],
+) -> String {
     if schedule.is_empty() {
         return "No tasks recorded. The project schedule is empty.".to_string();
     }
 
     let mut s = String::new();
     s.push_str(&format!("{DIM}================================================================================{RESET}\n"));
-    s.push_str(&format!("{BOLD_WHITE}CRITICAL PATH METHOD (CPM) PROJECT SCHEDULE ANALYSIS{RESET}\n"));
+    s.push_str(&format!(
+        "{BOLD_WHITE}CRITICAL PATH METHOD (CPM) PROJECT SCHEDULE ANALYSIS{RESET}\n"
+    ));
     s.push_str(&format!("{DIM}================================================================================{RESET}\n\n"));
 
     let total = schedule.len();
     let critical_tasks: Vec<&CpmTaskSchedule> = schedule.iter().filter(|t| t.is_critical).collect();
     let float_tasks: Vec<&CpmTaskSchedule> = schedule.iter().filter(|t| !t.is_critical).collect();
-    let blocked_tasks: Vec<&CpmTaskSchedule> = schedule.iter().filter(|t| t.status == "blocked").collect();
+    let blocked_tasks: Vec<&CpmTaskSchedule> =
+        schedule.iter().filter(|t| t.status == "blocked").collect();
 
     s.push_str(&format!("{BOLD_WHITE}1. EXECUTIVE SUMMARY{RESET}\n"));
-    s.push_str(&format!("- Total Project Duration: {BOLD}{}{RESET}\n", duration));
+    s.push_str(&format!(
+        "- Total Project Duration: {BOLD}{}{RESET}\n",
+        duration
+    ));
     s.push_str(&format!("- Total Active Tasks: {}\n", total));
     s.push_str(&format!(
         "- Critical Path Tasks: {BOLD}{RED}{}{RESET} ({:.0}% of project)\n",
         critical_tasks.len(),
         (critical_tasks.len() as f64 / total as f64) * 100.0
     ));
-    s.push_str(&format!("- Non-Critical Tasks with Float/Buffer: {}\n\n", float_tasks.len()));
+    s.push_str(&format!(
+        "- Non-Critical Tasks with Float/Buffer: {}\n\n",
+        float_tasks.len()
+    ));
 
-    s.push_str(&format!("{BOLD_WHITE}2. CRITICAL PATH EXECUTION CHAIN (ZERO FLOAT){RESET}\n"));
+    s.push_str(&format!(
+        "{BOLD_WHITE}2. CRITICAL PATH EXECUTION CHAIN (ZERO FLOAT){RESET}\n"
+    ));
     s.push_str("Any delay to these tasks directly delays project completion:\n");
     if critical_tasks.is_empty() {
         s.push_str("- None detected.\n");
@@ -929,13 +967,24 @@ pub fn generate_cpm_summary_long(duration: &str, critical_path: &[String], sched
         for t in &critical_tasks {
             s.push_str(&format!(
                 "- {BOLD}{AQUA}{}{RESET} [{}] \"{}\"\n  Dur: {} | ES: {} · EF: {} | Owner: @{}\n",
-                t.id, t.status, t.title, t.duration_display, format_duration_concise(t.early_start), format_duration_concise(t.early_finish), t.owner
+                t.id,
+                t.status,
+                t.title,
+                t.duration_display,
+                format_duration_concise(t.early_start),
+                format_duration_concise(t.early_finish),
+                t.owner
             ));
         }
-        s.push_str(&format!("\nSequence: {BOLD}{RED}{}{RESET}\n\n", critical_path.join(" ➔ ")));
+        s.push_str(&format!(
+            "\nSequence: {BOLD}{RED}{}{RESET}\n\n",
+            critical_path.join(" ➔ ")
+        ));
     }
 
-    s.push_str(&format!("{BOLD_WHITE}3. BOTTLENECK & DEPENDENCY ANALYSIS{RESET}\n"));
+    s.push_str(&format!(
+        "{BOLD_WHITE}3. BOTTLENECK & DEPENDENCY ANALYSIS{RESET}\n"
+    ));
     if blocked_tasks.is_empty() {
         s.push_str("- No tasks are currently in blocked status.\n\n");
     } else {
@@ -949,29 +998,40 @@ pub fn generate_cpm_summary_long(duration: &str, critical_path: &[String], sched
         s.push('\n');
     }
 
-    s.push_str(&format!("{BOLD_WHITE}4. SCHEDULE BUFFERS (FLOAT / BUFFER){RESET}\n"));
+    s.push_str(&format!(
+        "{BOLD_WHITE}4. SCHEDULE BUFFERS (FLOAT / BUFFER){RESET}\n"
+    ));
     if float_tasks.is_empty() {
         s.push_str("- No tasks have buffer. All tasks operate on the critical edge.\n\n");
     } else {
         for t in &float_tasks {
             s.push_str(&format!(
                 "- {BOLD}{AQUA}{}{RESET}: \"{}\"\n  Buffer: {GREEN}{}{RESET} | ES: {} · LS: {}\n",
-                t.id, t.title, t.buffer_display, format_duration_concise(t.early_start), format_duration_concise(t.late_start)
+                t.id,
+                t.title,
+                t.buffer_display,
+                format_duration_concise(t.early_start),
+                format_duration_concise(t.late_start)
             ));
         }
         s.push('\n');
     }
 
-    s.push_str(&format!("{BOLD_WHITE}5. ACTION PLAN FOR AGENTS AND HUMANS{RESET}\n"));
+    s.push_str(&format!(
+        "{BOLD_WHITE}5. ACTION PLAN FOR AGENTS AND HUMANS{RESET}\n"
+    ));
     let mut step = 1;
-    let pending_close_tasks: Vec<_> = schedule.iter().filter(|t| t.status == "pending-close").collect();
+    let pending_close_tasks: Vec<_> = schedule
+        .iter()
+        .filter(|t| t.status == "pending-close")
+        .collect();
     if !pending_close_tasks.is_empty() {
         let p_ids: Vec<_> = pending_close_tasks
             .iter()
             .map(|t| format!("{BOLD}{AQUA}{}{RESET} (@{})", t.id, t.owner))
             .collect();
         s.push_str(&format!(
-            "{}. Ken Sign-Off: Review and close tasks in pending-close: {}.\n",
+            "{}. Human sign-off: review and close tasks in pending-close: {}.\n",
             step,
             p_ids.join(", ")
         ));
@@ -981,11 +1041,18 @@ pub fn generate_cpm_summary_long(duration: &str, critical_path: &[String], sched
         s.push_str(&format!(
             "{}. Cascade Unblock: Closing blocker tasks will promote {} from blocked to ready.\n",
             step,
-            blocked_tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", ")
+            blocked_tasks
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         step += 1;
     }
-    let in_progress_tasks: Vec<_> = schedule.iter().filter(|t| t.status == "in-progress").collect();
+    let in_progress_tasks: Vec<_> = schedule
+        .iter()
+        .filter(|t| t.status == "in-progress")
+        .collect();
     if !in_progress_tasks.is_empty() {
         let ip_ids: Vec<_> = in_progress_tasks
             .iter()
@@ -1090,6 +1157,7 @@ pub fn print_json_value<T: serde::Serialize>(val: &T, force_color: bool) -> anyh
     let should_color =
         (std::io::stdout().is_terminal() || force_color) && std::env::var("NO_COLOR").is_err();
     if should_color {
+        crate::ansi::set_enabled(true);
         println!("{}", colorize_json(&json_str));
     } else {
         println!("{}", json_str);
@@ -1136,7 +1204,9 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
         }
     }
     let mid_start = mid_pos.saturating_sub(t_mid_str.len() / 2);
-    if mid_start > t0_str.len() + 1 && mid_start + t_mid_str.len() + 1 < bar_w.saturating_sub(t_end_str.len()) {
+    if mid_start > t0_str.len() + 1
+        && mid_start + t_mid_str.len() + 1 < bar_w.saturating_sub(t_end_str.len())
+    {
         for (idx, ch) in t_mid_str.chars().enumerate() {
             if mid_start + idx < bar_w {
                 ruler_chars[mid_start + idx] = ch;
@@ -1155,7 +1225,10 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
 
     // Header line
     let hdr_label = if label_w >= 22 {
-        format!("{BOLD_WHITE}{:<7} {:<7} {:<6}{RESET}", "ID", "Owner", "Status")
+        format!(
+            "{BOLD_WHITE}{:<7} {:<7} {:<6}{RESET}",
+            "ID", "Owner", "Status"
+        )
     } else if label_w >= 18 {
         format!("{BOLD_WHITE}{:<7} {:<10}{RESET}", "ID", "Status")
     } else {
@@ -1183,7 +1256,9 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
         if finish_col <= start_col && bar_w > 0 {
             finish_col = (start_col + 1).min(bar_w);
         }
-        let late_finish_col = ((late_finish_ratio * bar_w as f64).round() as usize).max(finish_col).min(bar_w);
+        let late_finish_col = ((late_finish_ratio * bar_w as f64).round() as usize)
+            .max(finish_col)
+            .min(bar_w);
 
         let (bar_color, is_crit) = if t.is_critical {
             if t.status == "pending-close" {
@@ -1223,8 +1298,15 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
         };
 
         let row_label = if label_w >= 22 {
-            let owner_trunc = if t.owner.len() > 6 { &t.owner[..6] } else { &t.owner };
-            format!("{BOLD}{:<7}{RESET} {DIM}@{:<6}{RESET} {:<6}", t.id, owner_trunc, status_short)
+            let owner_trunc = if t.owner.len() > 6 {
+                &t.owner[..6]
+            } else {
+                &t.owner
+            };
+            format!(
+                "{BOLD}{:<7}{RESET} {DIM}@{:<6}{RESET} {:<6}",
+                t.id, owner_trunc, status_short
+            )
         } else if label_w >= 18 {
             format!("{BOLD}{:<7}{RESET} {:<10}", t.id, status_short)
         } else {
@@ -1234,7 +1316,10 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
         let dur_info = if is_crit {
             format!(" {BOLD}{RED}{}{RESET}", t.duration_display)
         } else if t.buffer_seconds > 0 {
-            format!(" {} {DIM}(+{}){RESET}", t.duration_display, t.buffer_display)
+            format!(
+                " {} {DIM}(+{}){RESET}",
+                t.duration_display, t.buffer_display
+            )
         } else {
             format!(" {}", t.duration_display)
         };
@@ -1244,7 +1329,11 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
             if max_t >= 8 {
                 let mut title_sub = t.title.clone();
                 if title_sub.chars().count() > max_t {
-                    title_sub = title_sub.chars().take(max_t.saturating_sub(1)).collect::<String>() + "…";
+                    title_sub = title_sub
+                        .chars()
+                        .take(max_t.saturating_sub(1))
+                        .collect::<String>()
+                        + "…";
                 }
                 format!(" {DIM}\"{}\"{RESET}", title_sub)
             } else {
@@ -1254,7 +1343,10 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
             String::new()
         };
 
-        println!("  {} {DIM}│{RESET} {}{}{}", row_label, bar_render, dur_info, title_info);
+        println!(
+            "  {} {DIM}│{RESET} {}{}{}",
+            row_label, bar_render, dur_info, title_info
+        );
     }
 
     let mut div_bottom_chars = vec!['─'; bar_w];
@@ -1264,9 +1356,15 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
     let div_bottom: String = div_bottom_chars.into_iter().collect();
     println!("  {DIM}{}┴{}┘{RESET}", div_left, div_bottom);
 
-    println!("\n  {BOLD}Project Duration:{RESET} {}", analysis.project_duration_display);
+    println!(
+        "\n  {BOLD}Project Duration:{RESET} {}",
+        analysis.project_duration_display
+    );
     if !analysis.critical_path.is_empty() {
-        println!("  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}", analysis.critical_path.join(" ➔ "));
+        println!(
+            "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
+            analysis.critical_path.join(" ➔ ")
+        );
     }
     println!(
         "  {DIM}Legend: {BOLD}{RED}█{RESET} {DIM}Critical {BOLD}{PURPLE}█{RESET} {DIM}Review {BOLD}{ORANGE}█{RESET} {DIM}Active {AQUA}█{RESET} {DIM}Ready {GREEN}█{RESET} {DIM}Done {DIM}░ Buffer{RESET}\n"
@@ -1317,10 +1415,17 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
     let box_w = term_w.saturating_sub(6).min(66).max(44);
     let inner_w = box_w.saturating_sub(4);
 
-    let sched_map: HashMap<&str, &CpmTaskSchedule> = analysis.schedule.iter().map(|s| (s.id.as_str(), s)).collect();
+    let sched_map: HashMap<&str, &CpmTaskSchedule> = analysis
+        .schedule
+        .iter()
+        .map(|s| (s.id.as_str(), s))
+        .collect();
 
     for (stage_idx, &stage_es) in es_times.iter().enumerate() {
-        let stage_tasks: Vec<&&CpmTaskSchedule> = schedule.iter().filter(|t| t.early_start == stage_es).collect();
+        let stage_tasks: Vec<&&CpmTaskSchedule> = schedule
+            .iter()
+            .filter(|t| t.early_start == stage_es)
+            .collect();
         let es_display = format_duration_concise(stage_es);
 
         println!(
@@ -1355,7 +1460,10 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
 
             let (proj_display, proj_plain_len) = if let Some(p) = &t.project {
                 let clean_p = p.trim_matches('[').trim_matches(']');
-                (format!("{PURPLE}+{}{RESET}", clean_p), clean_p.chars().count() + 1)
+                (
+                    format!("{PURPLE}+{}{RESET}", clean_p),
+                    clean_p.chars().count() + 1,
+                )
             } else {
                 (format!("{DIM}[global]{RESET}"), 8)
             };
@@ -1378,10 +1486,19 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
             // Line 2: Title
             let mut title_sub = t.title.clone();
             if title_sub.chars().count() > inner_w {
-                title_sub = title_sub.chars().take(inner_w.saturating_sub(1)).collect::<String>() + "…";
+                title_sub = title_sub
+                    .chars()
+                    .take(inner_w.saturating_sub(1))
+                    .collect::<String>()
+                    + "…";
             }
             let pad_title = inner_w.saturating_sub(title_sub.chars().count());
-            println!("  {DIM}│{RESET} {}{}{} {DIM}│{RESET}", title_sub, " ".repeat(pad_title), RESET);
+            println!(
+                "  {DIM}│{RESET} {}{}{} {DIM}│{RESET}",
+                title_sub,
+                " ".repeat(pad_title),
+                RESET
+            );
 
             // Line 3: Metrics (Dur, ES, EF, Buffer, Owner)
             let es_str = format_duration_concise(t.early_start);
@@ -1392,20 +1509,37 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
             );
             let mut metrics_sub = metrics_str.clone();
             if metrics_sub.chars().count() > inner_w {
-                metrics_sub = metrics_sub.chars().take(inner_w.saturating_sub(1)).collect::<String>() + "…";
+                metrics_sub = metrics_sub
+                    .chars()
+                    .take(inner_w.saturating_sub(1))
+                    .collect::<String>()
+                    + "…";
             }
             let pad_metrics = inner_w.saturating_sub(metrics_sub.chars().count());
-            println!("  {DIM}│{RESET} {}{}{} {DIM}│{RESET}", metrics_sub, " ".repeat(pad_metrics), RESET);
+            println!(
+                "  {DIM}│{RESET} {}{}{} {DIM}│{RESET}",
+                metrics_sub,
+                " ".repeat(pad_metrics),
+                RESET
+            );
 
             // Line 4: Prerequisites if any
             if !t.blocked_by.is_empty() {
                 let reqs = format!("Needs: {}", t.blocked_by.join(", "));
                 let mut reqs_sub = reqs.clone();
                 if reqs_sub.chars().count() > inner_w {
-                    reqs_sub = reqs_sub.chars().take(inner_w.saturating_sub(1)).collect::<String>() + "…";
+                    reqs_sub = reqs_sub
+                        .chars()
+                        .take(inner_w.saturating_sub(1))
+                        .collect::<String>()
+                        + "…";
                 }
                 let pad_reqs = inner_w.saturating_sub(reqs_sub.chars().count());
-                println!("  {DIM}│{RESET} {RED}{}{RESET}{} {DIM}│{RESET}", reqs_sub, " ".repeat(pad_reqs));
+                println!(
+                    "  {DIM}│{RESET} {RED}{}{RESET}{} {DIM}│{RESET}",
+                    reqs_sub,
+                    " ".repeat(pad_reqs)
+                );
             }
 
             // Box bottom
@@ -1416,9 +1550,13 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
         if stage_idx + 1 < es_times.len() {
             let next_es = es_times[stage_idx + 1];
             let has_crit_handoff = schedule.iter().any(|pred| {
-                pred.early_start == stage_es && pred.is_critical && schedule.iter().any(|succ| {
-                    succ.early_start == next_es && succ.is_critical && succ.blocked_by.iter().any(|b| b == &pred.id)
-                })
+                pred.early_start == stage_es
+                    && pred.is_critical
+                    && schedule.iter().any(|succ| {
+                        succ.early_start == next_es
+                            && succ.is_critical
+                            && succ.blocked_by.iter().any(|b| b == &pred.id)
+                    })
             });
 
             if has_crit_handoff {
@@ -1468,12 +1606,20 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
     }
 
     if edge_count == 0 {
-        println!("    {DIM}No inter-task dependencies recorded (all tasks in this scope are unconstrained).{RESET}");
+        println!(
+            "    {DIM}No inter-task dependencies recorded (all tasks in this scope are unconstrained).{RESET}"
+        );
     }
 
-    println!("\n  {BOLD}Project Duration:{RESET} {}", analysis.project_duration_display);
+    println!(
+        "\n  {BOLD}Project Duration:{RESET} {}",
+        analysis.project_duration_display
+    );
     if !analysis.critical_path.is_empty() {
-        println!("  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}", analysis.critical_path.join(" ➔ "));
+        println!(
+            "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
+            analysis.critical_path.join(" ➔ ")
+        );
     }
     println!();
 }
@@ -1483,7 +1629,13 @@ mod tests {
     use super::*;
     use crate::model::{TaskCard, TaskFrontmatter, TaskStatus};
 
-    fn make_test_card(id: &str, title: &str, created: &str, due: Option<&str>, blocked_by: Vec<&str>) -> TaskCard {
+    fn make_test_card(
+        id: &str,
+        title: &str,
+        created: &str,
+        due: Option<&str>,
+        blocked_by: Vec<&str>,
+    ) -> TaskCard {
         TaskCard {
             meta: TaskFrontmatter {
                 id: id.to_string(),
@@ -1504,6 +1656,10 @@ mod tests {
                 dod: vec![],
                 eval: None,
                 eval_status: None,
+                claimed_eval: None,
+                receipt: None,
+                approval: None,
+                approved_eval: None,
                 created: created.to_string(),
                 updated: created.to_string(),
                 _organized: true,
@@ -1535,6 +1691,10 @@ mod tests {
                 dod: vec![],
                 eval: None,
                 eval_status: None,
+                claimed_eval: None,
+                receipt: None,
+                approval: None,
+                approved_eval: None,
                 created: "2026-10-18".to_string(),
                 updated: "2026-10-18".to_string(),
                 _organized: true,
@@ -1549,7 +1709,13 @@ mod tests {
     fn test_compute_cpm_linear_chain() {
         let cards = vec![
             make_test_card("tk-001", "Task 1", "2026-10-01", Some("2026-10-03"), vec![]), // 2 days
-            make_test_card("tk-002", "Task 2", "2026-10-03", Some("2026-10-06"), vec!["tk-001"]), // 3 days
+            make_test_card(
+                "tk-002",
+                "Task 2",
+                "2026-10-03",
+                Some("2026-10-06"),
+                vec!["tk-001"],
+            ), // 3 days
         ];
         let analysis = compute_cpm(&cards);
         assert_eq!(analysis.project_duration_days, 5);
@@ -1588,9 +1754,27 @@ mod tests {
         // Critical path must be tk-002 -> tk-003 (7d duration)
         // tk-001 must have schedule buffer of 4d
         let cards = vec![
-            make_test_card("tk-001", "Short Task", "2026-10-01", Some("2026-10-02"), vec![]), // 1d
-            make_test_card("tk-002", "Long Task", "2026-10-01", Some("2026-10-06"), vec![]), // 5d
-            make_test_card("tk-003", "Final Task", "2026-10-06", Some("2026-10-08"), vec!["tk-001", "tk-002"]), // 2d
+            make_test_card(
+                "tk-001",
+                "Short Task",
+                "2026-10-01",
+                Some("2026-10-02"),
+                vec![],
+            ), // 1d
+            make_test_card(
+                "tk-002",
+                "Long Task",
+                "2026-10-01",
+                Some("2026-10-06"),
+                vec![],
+            ), // 5d
+            make_test_card(
+                "tk-003",
+                "Final Task",
+                "2026-10-06",
+                Some("2026-10-08"),
+                vec!["tk-001", "tk-002"],
+            ), // 2d
         ];
         let analysis = compute_cpm(&cards);
         assert_eq!(analysis.project_duration_days, 7);
@@ -1627,17 +1811,43 @@ mod tests {
     #[test]
     fn test_cpm_summaries() {
         let cards = vec![
-            make_test_card("tk-001", "Short Task", "2026-10-01", Some("2026-10-02"), vec![]),
-            make_test_card("tk-002", "Long Task", "2026-10-01", Some("2026-10-06"), vec![]),
-            make_test_card("tk-003", "Final Task", "2026-10-06", Some("2026-10-08"), vec!["tk-001", "tk-002"]),
+            make_test_card(
+                "tk-001",
+                "Short Task",
+                "2026-10-01",
+                Some("2026-10-02"),
+                vec![],
+            ),
+            make_test_card(
+                "tk-002",
+                "Long Task",
+                "2026-10-01",
+                Some("2026-10-06"),
+                vec![],
+            ),
+            make_test_card(
+                "tk-003",
+                "Final Task",
+                "2026-10-06",
+                Some("2026-10-08"),
+                vec!["tk-001", "tk-002"],
+            ),
         ];
         let analysis = compute_cpm(&cards);
         assert!(analysis.summary_short.contains("Project duration: 7d"));
         assert!(analysis.summary_short.contains("tk-002 ➔ tk-003"));
-        assert!(analysis.summary_long.contains("CRITICAL PATH METHOD (CPM) PROJECT SCHEDULE ANALYSIS"));
+        assert!(
+            analysis
+                .summary_long
+                .contains("CRITICAL PATH METHOD (CPM) PROJECT SCHEDULE ANALYSIS")
+        );
         assert!(analysis.summary_long.contains("Total Project Duration:"));
         assert!(analysis.summary_long.contains("7d"));
-        assert!(analysis.summary_long.contains("SCHEDULE BUFFERS (FLOAT / BUFFER)"));
+        assert!(
+            analysis
+                .summary_long
+                .contains("SCHEDULE BUFFERS (FLOAT / BUFFER)")
+        );
     }
 
     #[test]
