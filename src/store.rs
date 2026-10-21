@@ -1191,10 +1191,26 @@ views:
             if let Some(hash) =
                 git_output(root, &["hash-object", "--", &canon.to_string_lossy()], None)
             {
-                out.insert(rel, hash);
+                // The blob hash covers contents only; the executable bit decides whether
+                // `./check.sh` runs at all, so it is part of the pin.
+                out.insert(
+                    rel,
+                    format!("{}{}", hash, if is_executable(&canon) { ":x" } else { "" }),
+                );
             }
         }
         out
+    }
+
+    /// How the task's check changed since it was pinned at claim (or `tk auto`), if it did.
+    pub fn check_change(&self, card: &TaskCard) -> Option<String> {
+        card.meta.check_pinned_at.as_ref()?;
+        describe_check_change(
+            card.meta.claimed_eval.as_deref(),
+            &card.meta.claimed_eval_inputs,
+            card.meta.eval.as_deref(),
+            &self.eval_inputs(card.meta.eval.as_deref()),
+        )
     }
 
     /// An archived card (`tasks/archive/<id>-*.md`) here or in the peer store.
@@ -1995,6 +2011,9 @@ views:
             }
         }
 
+        // Captured before the eval runs: a direct close has no receipt to carry it.
+        let changed_since_claim =
+            card.meta.status != TaskStatus::PendingClose && self.check_change(&card).is_some();
         let (passed, eval_out) = self.eval_card(&mut card, &owner)?;
         if !passed {
             self.write_card(&card)?;
@@ -2011,7 +2030,8 @@ views:
             .meta
             .receipt
             .as_ref()
-            .is_some_and(|r| r.check_changed.is_some());
+            .is_some_and(|r| r.check_changed.is_some())
+            || changed_since_claim;
         let approval_label = if accept_changed_eval && check_was_changed {
             "interactive (accepted changed check)".to_string()
         } else {
@@ -2880,6 +2900,17 @@ fn has_eval(card: &TaskCard) -> bool {
         .eval
         .as_deref()
         .is_some_and(|e| !e.trim().is_empty())
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    false
 }
 
 /// Most files an eval command may pin (anything beyond is ignored).
@@ -4630,6 +4661,73 @@ mod tests {
             .complete_task_with("1", "ken", None, Approval::Interactive)
             .unwrap();
         assert_eq!(done.meta.status, TaskStatus::Done);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery PR #2, #2): `git hash-object` ignores the mode, so making the pinned
+    /// script executable after claim went unnoticed.
+    #[cfg(unix)]
+    #[test]
+    fn test_making_the_script_executable_after_claim_is_a_change() {
+        use std::os::unix::fs::PermissionsExt;
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("pin-mode");
+        let script = Path::new(&store.config.vault_path).join("check.sh");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        store
+            .add_task("p1 work", None, vec![], Some("./check.sh".into()), None)
+            .unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let r = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap()
+            .meta
+            .receipt
+            .unwrap();
+        assert!(
+            r.check_changed
+                .as_deref()
+                .is_some_and(|c| c.contains("check.sh")),
+            "{:?}",
+            r.check_changed
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery PR #2, #1): closing your own task directly after accepting a changed check
+    /// recorded a plain `interactive` approval, hiding the acceptance.
+    #[test]
+    fn test_direct_close_records_an_accepted_check_change() {
+        let (store, tmp) = hardening_store("pin-direct");
+        store
+            .add_task("p1 mine", None, vec![], Some("exit 0".into()), None)
+            .unwrap();
+        store.claim_task("1", "ken", None, false).unwrap();
+        store
+            .update_task("1", None, None, None, None, vec![], Some("true".into()))
+            .unwrap();
+        let card = store.find_task("1").unwrap();
+        assert!(
+            store
+                .check_change(&card)
+                .is_some_and(|c| c.contains("eval"))
+        );
+        assert!(
+            store
+                .complete_task_with("1", "ken", None, Approval::Interactive)
+                .is_err()
+        );
+        let done = store
+            .complete_task_confirmed("1", "ken", None, Approval::Interactive, None, true)
+            .unwrap();
+        assert_eq!(
+            done.meta.approval.as_deref(),
+            Some("interactive (accepted changed check)")
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }

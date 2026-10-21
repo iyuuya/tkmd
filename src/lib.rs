@@ -2780,12 +2780,17 @@ fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
                 writeln!(err, "      {ORANGE}warning:{RESET} no automated check ran")?;
             }
         }
-        if let Some(change) = card
+        let change = card
             .meta
             .receipt
             .as_ref()
-            .and_then(|r| r.check_changed.as_ref())
-        {
+            .and_then(|r| r.check_changed.clone())
+            .or_else(|| {
+                (card.meta.status != TaskStatus::PendingClose)
+                    .then(|| store.check_change(card))
+                    .flatten()
+            });
+        if let Some(change) = change {
             writeln!(
                 err,
                 "      {RED}check changed since claim:{RESET} {} (approve only with --accept-changed-eval)",

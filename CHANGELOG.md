@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The check is pinned at claim** (suggested by prpatel05 on dev.to). The first claim records the eval command and a git blob hash of each repo file it names; re-claiming keeps the pin. If an agent changes the eval or its script before submitting, the receipt records what changed and `tk d` refuses until the human passes `--accept-changed-eval`. Previously this only warned.
 - `tk auto` pins the eval's files too: a script changed after approval no longer auto-closes; the task waits for manual sign-off.
 - A file the eval names that changes after submit now blocks approval even outside git, where there is no worktree snapshot.
+- The pin includes each file's executable bit: making `./check.sh` executable after claim is a change (the blob hash alone covers contents only).
+- Closing your own task directly after accepting a changed check records `interactive (accepted changed check)`, and the sign-off summary shows the change, as it already did for reviewed tasks.
 
 ### Changed
 - `tk d` gains `--accept-changed-eval`; the sign-off summary shows exactly what changed (`check.sh changed`, ``eval `a` -> `b` ``).
