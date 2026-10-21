@@ -18,11 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bulk sign-off**: `tk done 1 2 3` or `tk done --pending` shows one summary and asks once. Tasks that fail their checks are skipped and reported; the rest close.
 - **Auto-accept (`tk auto <ids>`)**: approve a task's eval in advance; when the owner submits and that exact eval passes, the task closes as `approval: auto:eval` and unblocks dependents. Changing the eval revokes it, `tk auto <ids> --off` turns it off, and agents cannot grant it. You approve the check once instead of every outcome.
 - **Eval timeout**: `[policy].eval_timeout_secs` (default 600, `0` = no limit). A timed-out eval fails, and every process it started is killed, so it cannot hold the card lock.
+- **`tk doctor`**: checks every card against the event log and flags cards hand-edited to `done` or given an approval `tk auto` never granted (exit 1 on issues).
+- **Trust model** in `docs/design.md`: what tkmd prevents, what it only detects, and how to isolate the store from untrusted agents.
 - **MCP `task_get`**: fetch one full card (body, log, sessions, receipt).
 - **Test suites**: `tests/concurrency.rs` races real `tk` processes (adds, claims, updates, submits, mixed workloads); `tests/scale.rs` (opt-in) times commands on 3,000 cards.
 - Changing `eval` on a `pending-close` task moves it back to `in-progress`; the card records the eval at claim time so the sign-off prompt can show a changed check.
 
 ### Fixed
+- From an independent Codex review (each reproduced first, then covered by a failing test):
+  - Concurrent `tk dep` commands each validated against the same old graph and together committed a cycle; dependency edits now run under a store-wide lock.
+  - A background child (`sleep 4 &`) kept the eval's output open past `eval_timeout_secs` and the eval then passed; the deadline now covers the whole process group and output collection, and captured output is capped at 1 MiB per stream.
+  - A blocker whose card was deleted counted as done, so `tk c` failed open; missing blockers now block, with a message saying how to repair.
+  - `tk r` printed "pending-close" when the task had auto-accepted into `done`.
+  - A receipt made without git looked like any other; it now records why there is no snapshot, and warns when git is unavailable.
+  - MCP ignored malformed JSON and answered unknown methods with an empty success; they now get `-32700` and `-32601` errors.
+  - The CPM summary said "Ken Sign-Off"; it now says "Human sign-off".
+- Single-task commands parsed every card in the store (about 0.9 s each at 20,000 cards, 2.9 s for `tk dep`). Id lookups now use the `tk-NNN-slug.md` file name and parse one card; `next_id`, blocker checks and the cycle check follow. Measured at 20,000 cards, release build, median of 5: `show` 876 to 15 ms, `claim` 930 to 14 ms, `dep` 2,880 to 25 ms. `ls` and `doctor` still read every card (about 0.9 s).
+- Deleting or archiving the newest card let `tk add` reuse its id, so old references pointed at a new task; ids now also count archived cards and the event log.
 - Racing `tk add` processes reused task ids; id allocation now runs under a store lock.
 - An unparsable config was silently replaced by defaults (dropping `[policy]`); it is now an error naming the file.
 - Task lookup matched parent directory names, took the first of several matches, and resolved `100` to `tk-1000`. Ids now match exactly; a name fragment must match one card, otherwise the error lists the candidates.
@@ -32,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unreadable cards vanished silently from listings; they are now named on stderr.
 
 ### Changed
-- MCP `task_list` returns compact summaries by default (82% smaller on 50 realistic cards: 8.4 KB vs 45.7 KB). Pass `detail: "full"` for complete cards, `limit` to cap the count.
+- MCP `task_list` returns `{tasks, total, next_offset}`: compact summaries, 100 per page by default (82% smaller per card on 50 realistic cards: 8.4 KB vs 45.7 KB). Pass `detail: "full"` for complete cards, and `limit`/`offset` to page.
 - Colour is off when stdout is not a terminal (agents get plain text); `NO_COLOR` still wins.
 - Card lock files are hidden (`.tk-001-x.lock`). Do not mix this version with older `tk` binaries on one store: they lock different files.
 - `tk r` records you as the submitter when run at a terminal, `agent` otherwise.

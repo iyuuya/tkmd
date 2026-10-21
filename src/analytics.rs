@@ -1031,7 +1031,7 @@ pub fn generate_cpm_summary_long(
             .map(|t| format!("{BOLD}{AQUA}{}{RESET} (@{})", t.id, t.owner))
             .collect();
         s.push_str(&format!(
-            "{}. Ken Sign-Off: Review and close tasks in pending-close: {}.\n",
+            "{}. Human sign-off: review and close tasks in pending-close: {}.\n",
             step,
             p_ids.join(", ")
         ));

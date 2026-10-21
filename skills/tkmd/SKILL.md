@@ -61,7 +61,8 @@ All active tasks live as atomic Markdown cards in `tasks/tk-XXX-*.md` (and rende
    tk dep --aon           # Outputs Activity-on-Node (AON) CPM network diagram
    tk dep --mermaid       # Outputs standard Mermaid flowchart
    ```
-   - **MCP `task_list` / `task_get`**: list returns compact summaries; call `task_get` for the one card you will work on instead of `detail: "full"`.
+   - **MCP `task_list` / `task_get`**: list returns `{tasks, total, next_offset}` with compact summaries, 100 per page; pass `offset` for the next page, and call `task_get` for the one card you will work on instead of `detail: "full"`.
+   - Never edit task cards or `.events.jsonl` directly: `tk doctor` flags state the event log does not explain.
    - **MCP Tool `task_cpm`**: AI agents can query project duration, critical path sequences, and task schedule buffers directly without diagrams or shell execution.
    - In `todo.txt` syntax, tasks can declare dependencies with `needs:1,2`, `after:1,2`, or `dep:1,2`.
    - Blocked tasks cannot be claimed (`claim` guardrail).

@@ -139,7 +139,23 @@ require_eval = true        # no-eval tasks cannot reach pending-close
 eval_timeout_secs = 600    # kill a hung eval (and its children); 0 = no limit
 ```
 
-Concurrent agents are serialized with an advisory `flock` per card on Unix. On Windows the lock is a no-op.
+Concurrent agents are serialized with an advisory `flock` per card on Unix, plus a store-wide lock for id allocation and dependency edits. On Windows the locks are no-ops.
+
+#### Trust model
+
+tkmd protects against agents that are sloppy or over-eager but work through `tk` and MCP: an agent that marks its own work done, claims another agent's task, submits stale output, or loops on a hung check. It does **not** protect against an agent that deliberately attacks the store, because cards and the event log are plain files the agent can write:
+
+| An agent can | Prevented? | Detected? |
+|---|---|---|
+| Close its own work through `tk d` or MCP | Yes | — |
+| Edit a card to `status: done` or add `approved_eval` | No | Yes, `tk doctor` |
+| Fake a terminal to answer the sign-off prompt | No | No |
+| Change the script or tests behind an approved `tk auto` eval | No | Partly: the receipt snapshot changes |
+| Edit `.events.jsonl` as well as the card | No | No |
+
+For adversarial settings, take the store out of the agent's reach: give agents MCP only, and run `tk mcp` as a separate OS user (or in a sandbox) that owns the task directory, so the agent cannot write cards or events. Approve with `tk auto` only evals the agent cannot change, such as a CI job or a test suite outside its working tree.
+
+Run `tk doctor` to check every card against the event log.
 
 
 ### Session Resumption (`tk u <id>`)

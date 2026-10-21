@@ -114,6 +114,23 @@ impl Drop for Sandbox {
     }
 }
 
+/// The `blocked_by` list from a card's frontmatter.
+fn blocked_by(card: &str) -> Vec<String> {
+    let fm = card.split("\n---").next().unwrap_or("");
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in fm.lines() {
+        if line.starts_with("blocked_by:") {
+            inside = true;
+        } else if inside && line.starts_with("- ") {
+            out.push(line[2..].trim().to_string());
+        } else if inside {
+            break;
+        }
+    }
+    out
+}
+
 fn assert_valid_card(s: &str) {
     assert!(s.starts_with("---\n"), "card lost its frontmatter:\n{}", s);
     assert!(Sandbox::field(s, "id").is_some(), "card has no id:\n{}", s);
@@ -442,4 +459,112 @@ fn lock_files_are_hidden() {
         .filter(|n| n.ends_with(".lock") && !n.starts_with('.'))
         .collect();
     assert!(visible.is_empty(), "visible lock files: {:?}", visible);
+}
+
+// ---- Findings from the independent Codex review ----
+
+/// RED (Codex F4): a background child kept the eval's output open past the timeout, and the
+/// eval then passed.
+#[test]
+fn background_eval_child_cannot_outlive_the_timeout() {
+    let sb = Sandbox::new("bgtimeout");
+    sb.ok(&["add", "p1 sneaky check"]);
+    let cfg = sb.root.join("home/.config/tkmd/config.toml");
+    let text = std::fs::read_to_string(&cfg)
+        .unwrap()
+        .replace("eval_timeout_secs = 600", "eval_timeout_secs = 1");
+    std::fs::write(&cfg, text).unwrap();
+    sb.ok(&["set", "1", "--eval", "sleep 6 &"]);
+    let start = Instant::now();
+    let o = sb.tk(&["eval", "1", "-a", "agent"]);
+    let took = start.elapsed();
+    assert!(
+        took < Duration::from_secs(4),
+        "eval outlived its 1s timeout: {:?}",
+        took
+    );
+    assert!(!o.status.success(), "a timed-out eval must not pass");
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
+/// RED (Codex F3): three `tk dep` commands validated against the same old graph and together
+/// committed a cycle. Deterministic: hold every card lock, start all three, then release.
+#[cfg(unix)]
+#[test]
+fn concurrent_dependency_edges_cannot_form_a_cycle() {
+    use std::os::unix::io::AsRawFd;
+    let sb = Sandbox::new("depcycle");
+    for t in ["p1 a", "p1 b", "p1 c"] {
+        sb.ok(&["add", t]);
+    }
+    let locks: Vec<std::fs::File> = sb
+        .cards()
+        .iter()
+        .map(|(p, _)| {
+            let stem = p.file_stem().unwrap().to_string_lossy().to_string();
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(p.with_file_name(format!(".{}.lock", stem)))
+                .unwrap();
+            assert_eq!(unsafe { flock(f.as_raw_fd(), 2) }, 0);
+            f
+        })
+        .collect();
+    let children: Vec<_> = [
+        ["dep", "1", "--needs", "2"],
+        ["dep", "2", "--needs", "3"],
+        ["dep", "3", "--needs", "1"],
+    ]
+    .iter()
+    .map(|a| sb.cmd(a).spawn().unwrap())
+    .collect();
+    thread::sleep(Duration::from_millis(300));
+    drop(locks);
+    let ok = children
+        .into_iter()
+        .filter(|_| true)
+        .map(|c| c.wait_with_output().unwrap())
+        .filter(|o| o.status.success())
+        .count();
+    assert!(
+        ok <= 2,
+        "all three edges committed: the graph now has a cycle"
+    );
+    let edges: usize = sb.cards().iter().map(|(_, s)| blocked_by(s).len()).sum();
+    assert!(edges <= 2, "{} blocked_by edges written: a cycle", edges);
+}
+
+/// RED (Codex F6): `tk r` said "pending-close" when the task had auto-accepted into done.
+#[test]
+fn review_reports_auto_acceptance_truthfully() {
+    let sb = Sandbox::new("automsg");
+    sb.ok(&["add", "p1 routine"]);
+    sb.ok(&["set", "1", "--eval", "true"]);
+    let (path, card) = sb.cards().remove(0);
+    std::fs::write(
+        &path,
+        card.replacen("eval: 'true'", "eval: 'true'\napproved_eval: 'true'", 1),
+    )
+    .unwrap();
+    let out = sb.ok(&["r", "1", "-a", "agent"]);
+    assert_eq!(
+        Sandbox::field(&sb.card("tk-001"), "status").as_deref(),
+        Some("done")
+    );
+    assert!(
+        !out.contains("pending-close"),
+        "review printed pending-close for a done task:\n{}",
+        out
+    );
+    assert!(
+        out.contains("Auto-accepted"),
+        "review should say it auto-accepted:\n{}",
+        out
+    );
 }

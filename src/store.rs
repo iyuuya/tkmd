@@ -969,14 +969,27 @@ views:
         }
     }
 
+    /// Next free id. Counts live cards, archived cards and every id in the event log, so a
+    /// deleted or archived task's id is never handed to a new task.
     pub fn next_id(&self) -> Result<String> {
-        let cards = self.list_all()?;
-        let max_num = cards
-            .iter()
-            .filter_map(|c| c.meta.id.strip_prefix("tk-"))
-            .filter_map(|n| n.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
+        let num = |id: &str| id.strip_prefix("tk-").and_then(|n| n.parse::<u32>().ok());
+        // File names carry the id (`tk-NNN-slug.md`), so no card needs to be parsed.
+        let mut max_num = Self::max_id_in_dir(&self.tasks_path)
+            .max(Self::max_id_in_dir(&self.tasks_path.join("archive")));
+        if self.active_scope == ScopeSelection::All
+            && let Some(peer) = &self.peer
+        {
+            max_num = max_num.max(Self::max_id_in_dir(&peer.tasks_path));
+        }
+        if let Ok(raw) = fs::read_to_string(self.tasks_path.join(".events.jsonl")) {
+            for line in raw.lines() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+                    && let Some(n) = v.get("id").and_then(|i| i.as_str()).and_then(num)
+                {
+                    max_num = max_num.max(n);
+                }
+            }
+        }
         Ok(format!("tk-{:03}", max_num + 1))
     }
 
@@ -1123,6 +1136,43 @@ views:
         Ok(card)
     }
 
+    /// Card files are named `<id>-<slug>.md`, so an id lookup reads one directory listing and
+    /// parses one file instead of every card in the store.
+    fn card_by_id_fast(&self, id: &str) -> Option<TaskCard> {
+        let prefix = format!("{}-", id.to_lowercase());
+        let exact = format!("{}.md", id.to_lowercase());
+        for entry in fs::read_dir(&self.tasks_path).ok()?.flatten() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if !(name.ends_with(".md") && (name.starts_with(&prefix) || name == exact)) {
+                continue;
+            }
+            if let Ok(mut card) = Self::read_card(&entry.path())
+                && card.meta.id.eq_ignore_ascii_case(id)
+            {
+                card.scope = self.scope;
+                return Some(card);
+            }
+        }
+        None
+    }
+
+    /// Highest `tk-NNN` number among card file names in `dir` (no card parsing).
+    fn max_id_in_dir(dir: &Path) -> u32 {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                let id = name.splitn(3, '-').take(2).collect::<Vec<_>>().join("-");
+                id.strip_prefix("tk-")
+                    .and_then(|n| n.trim_end_matches(".md").parse::<u32>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Resolve a task by id (`7`, `tk-7`, `tk-007`) or by a unique fragment of its file name.
     /// Ids match exactly. A name fragment matching several cards is an error listing them,
     /// so `tk d smoke` can never close the wrong task.
@@ -1131,8 +1181,14 @@ views:
         let digits = q.strip_prefix("tk-").unwrap_or(&q);
         let id_query = digits.parse::<u32>().ok().map(|n| format!("tk-{:03}", n));
 
+        if let Some(id) = &id_query
+            && let Some(card) = self.card_by_id_fast(id)
+        {
+            return Ok(card);
+        }
         let cards = self.list_store_cards()?;
         if let Some(id) = &id_query {
+            // Slow path: a card whose file name no longer starts with its id.
             if let Some(card) = cards
                 .into_iter()
                 .find(|c| c.meta.id.eq_ignore_ascii_case(id))
@@ -1274,25 +1330,25 @@ views:
         Ok(card)
     }
 
-    /// Ids in `card.blocked_by` that are not yet done or archived (unknown ids count as closed).
+    /// Blockers in `card.blocked_by` that are not done or archived. A blocker whose card cannot
+    /// be found stays blocking (reported as missing): unknown is not the same as done.
     fn open_blockers(&self, card: &TaskCard) -> Result<Vec<String>> {
         if card.meta.blocked_by.is_empty() {
             return Ok(Vec::new());
         }
-        let all = self.list_all()?;
-        Ok(card
-            .meta
-            .blocked_by
-            .iter()
-            .filter(|bid| {
-                all.iter()
-                    .find(|c| c.meta.id.eq_ignore_ascii_case(bid))
-                    .is_some_and(|t| {
-                        !matches!(t.meta.status, TaskStatus::Done | TaskStatus::Archived)
-                    })
-            })
-            .cloned()
-            .collect())
+        let mut open = Vec::new();
+        for bid in &card.meta.blocked_by {
+            let status = self.find_task(bid).ok().map(|c| c.meta.status);
+            match status {
+                Some(TaskStatus::Done | TaskStatus::Archived) => {}
+                Some(_) => open.push(bid.clone()),
+                None => open.push(format!(
+                    "{} (missing: its card was deleted; remove it from blocked_by)",
+                    bid
+                )),
+            }
+        }
+        Ok(open)
     }
 
     /// Runs the task's `eval` shell command (if configured) and records pass/fail on the card.
@@ -1484,8 +1540,18 @@ views:
             .filter(|s| !s.trim().is_empty())
             .or_else(Self::detect_env_session_id);
         Self::record_session_on_card(&mut card, actor, resolved_sid.as_deref());
+        let (snapshot, snapshot_note) = self.snapshot_with_note();
+        if let Some(note) = snapshot_note.as_deref()
+            && note != "not a git repository"
+        {
+            eprintln!(
+                "warning: {}: review receipt has no output snapshot ({})",
+                card.meta.id, note
+            );
+        }
         card.meta.receipt = Some(ReviewReceipt {
-            snapshot: self.worktree_snapshot(),
+            snapshot,
+            snapshot_note,
             eval: card.meta.eval.clone(),
             eval_result: if card.meta.eval.is_some() {
                 "passed"
@@ -1786,6 +1852,21 @@ views:
             .map(|c| c.meta.id.to_lowercase())
             .filter(|id| !id.eq_ignore_ascii_case(completed_id))
             .collect();
+        let known: std::collections::HashSet<String> =
+            all.iter().map(|c| c.meta.id.to_lowercase()).collect();
+        // A blocker with no card stays blocking (unless another store resolves it as closed).
+        let still_blocking = |bid: &String| {
+            let b = bid.to_lowercase();
+            if b == completed_id.to_lowercase() {
+                return false;
+            }
+            if known.contains(&b) {
+                return open.contains(&b);
+            }
+            !self
+                .find_task(bid)
+                .is_ok_and(|c| matches!(c.meta.status, TaskStatus::Done | TaskStatus::Archived))
+        };
         for other in all {
             if !other
                 .meta
@@ -1809,7 +1890,7 @@ views:
                 .meta
                 .blocked_by
                 .iter()
-                .filter(|bid| open.contains(&bid.to_lowercase()))
+                .filter(|bid| still_blocking(bid))
                 .count();
 
             if remaining_blockers == 0 {
@@ -1842,15 +1923,29 @@ views:
     /// (they change on every transition). Built with a throwaway index, so the user's index and
     /// refs are untouched. `None` outside a git repo, or when the cards are the repo root.
     pub fn worktree_snapshot(&self) -> Option<String> {
+        self.snapshot_with_note().0
+    }
+
+    /// The snapshot, or the reason there is none (stored on the receipt so it never looks
+    /// stronger than its evidence).
+    pub fn snapshot_with_note(&self) -> (Option<String>, Option<String>) {
         let dir = Path::new(&self.config.vault_path);
-        let top = PathBuf::from(git_output(dir, &["rev-parse", "--show-toplevel"], None)?);
-        let top_canon = top.canonicalize().ok()?;
+        if Command::new("git").arg("--version").output().is_err() {
+            return (None, Some("git unavailable".to_string()));
+        }
+        let Some(top) = git_output(dir, &["rev-parse", "--show-toplevel"], None).map(PathBuf::from)
+        else {
+            return (None, Some("not a git repository".to_string()));
+        };
+        let Ok(top_canon) = top.canonicalize() else {
+            return (None, Some("repository path unreadable".to_string()));
+        };
         let mut pathspecs = vec![".".to_string()];
         if let Ok(tasks_canon) = self.tasks_path.canonicalize()
             && let Ok(rel) = tasks_canon.strip_prefix(&top_canon)
         {
             if rel.as_os_str().is_empty() {
-                return None;
+                return (None, Some("task cards are the repository root".to_string()));
             }
             pathspecs.push(format!(":(exclude){}", rel.display()));
         }
@@ -1865,7 +1960,10 @@ views:
         let tree = git_output(&top, &add_args, Some(index.as_path()))
             .and_then(|_| git_output(&top, &["write-tree"], Some(index.as_path())));
         let _ = fs::remove_file(&index);
-        tree.filter(|t| !t.is_empty())
+        match tree.filter(|t| !t.is_empty()) {
+            Some(t) => (Some(t), None),
+            None => (None, Some("git snapshot failed".to_string())),
+        }
     }
 
     /// Update properties on a task card (title, priority, owner, due, dod, eval).
@@ -2003,6 +2101,10 @@ views:
 
     /// Add dependency: `dependent_id` will be blocked by `blocker_ids`.
     pub fn add_dependency(&self, dependent_id: &str, blocker_ids: &[String]) -> Result<TaskCard> {
+        // One graph-wide lock: validation and every card write happen as one transaction, so
+        // concurrent edges cannot each pass against the same old graph and form a cycle.
+        fs::create_dir_all(&self.tasks_path)?;
+        let _graph_lock = Self::lock_card(&self.tasks_path)?;
         let found = self.find_task(dependent_id)?;
         let today = Local::now().format("%Y-%m-%d").to_string();
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
@@ -2016,17 +2118,10 @@ views:
             blockers.push(blocker);
         }
 
-        // Refuse edges that would close a cycle: walk each blocker's own dependencies.
-        let graph: std::collections::HashMap<String, Vec<String>> = self
-            .list_all()?
-            .into_iter()
-            .map(|c| {
-                (
-                    c.meta.id.to_lowercase(),
-                    c.meta.blocked_by.iter().map(|b| b.to_lowercase()).collect(),
-                )
-            })
-            .collect();
+        // Refuse edges that would close a cycle: walk each blocker's own dependencies, loading
+        // only the cards on the path (not the whole store).
+        let mut deps_of: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         let target = found.meta.id.to_lowercase();
         for blocker in &blockers {
             let mut stack = vec![(
@@ -2047,10 +2142,15 @@ views:
                 if !seen.insert(node.clone()) {
                     continue;
                 }
-                for next in graph.get(&node).into_iter().flatten() {
+                let next = deps_of.entry(node.clone()).or_insert_with(|| {
+                    self.find_task(&node)
+                        .map(|c| c.meta.blocked_by.iter().map(|b| b.to_lowercase()).collect())
+                        .unwrap_or_default()
+                });
+                for n in next.clone() {
                     let mut p = path.clone();
-                    p.push(next.to_uppercase().replace("TK-", "tk-"));
-                    stack.push((next.clone(), p));
+                    p.push(n.clone());
+                    stack.push((n, p));
                 }
             }
         }
@@ -2229,6 +2329,48 @@ views:
     }
 
     /// Read all telemetry events from `tasks/.events.jsonl`.
+    /// Cards whose state the event log does not explain: `done` with no completion event, or an
+    /// auto-accept approval with no `eval-approved` event. tkmd cannot stop an agent that writes
+    /// the store directly; this is how such edits get noticed. Empty means consistent.
+    pub fn integrity_report(&self) -> Result<Vec<String>> {
+        let events = Self::read_events_from_path(&self.tasks_path)?;
+        let mut issues = Vec::new();
+        for card in self.list_store_cards()? {
+            let id = card.meta.id.as_str();
+            let mine: Vec<&TaskEvent> = events
+                .iter()
+                .filter(|e| e.id.eq_ignore_ascii_case(id))
+                .collect();
+            if card.meta.status == TaskStatus::Done && !mine.iter().any(|e| e.to_status == "done") {
+                issues.push(format!(
+                    "{}: status is `done` but no completion was recorded (card edited by hand?)",
+                    id
+                ));
+            }
+            if card.meta.approved_eval.is_some() {
+                let last = mine
+                    .iter()
+                    .rev()
+                    .find(|e| e.action == "eval-approved" || e.action == "eval-approval-revoked");
+                if !last.is_some_and(|e| e.action == "eval-approved") {
+                    issues.push(format!(
+                        "{}: auto-accept approval is set but was never granted with `tk auto` (card edited by hand?)",
+                        id
+                    ));
+                }
+            }
+            if card.meta.approval.as_deref() == Some("auto:eval")
+                && !mine.iter().any(|e| e.action == "eval-approved")
+            {
+                issues.push(format!(
+                    "{}: auto-accepted without a recorded `tk auto` approval",
+                    id
+                ));
+            }
+        }
+        Ok(issues)
+    }
+
     pub fn read_events(&self) -> Result<Vec<TaskEvent>> {
         let mut events = Self::read_events_from_path(&self.tasks_path)?;
         if self.active_scope == ScopeSelection::All
@@ -2467,9 +2609,15 @@ fn warn_unreadable_card(path: &Path, err: &anyhow::Error) {
     }
 }
 
+/// Most bytes kept from each of an eval's stdout and stderr; the rest is drained and dropped.
+const EVAL_CAPTURE_LIMIT: usize = 1 << 20;
+/// After the eval's shell exits, how long background children may keep its output open.
+const EVAL_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Run a command, killing it and every process it started if it outlives `timeout`.
-/// Returns `Ok(None)` on timeout. stdout and stderr are drained on threads so a chatty eval
-/// cannot fill a pipe and stall.
+/// The deadline covers the whole process group and output collection, not just the shell:
+/// a background child that keeps stdout open cannot stretch the eval past its timeout.
+/// Returns `Ok(None)` on timeout. Output is drained on threads and capped per stream.
 fn run_with_timeout(
     mut cmd: Command,
     timeout: Option<std::time::Duration>,
@@ -2485,36 +2633,67 @@ fn run_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let out_t = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = p.read_to_end(&mut b);
-        }
-        b
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.read_to_end(&mut b);
-        }
-        b
-    });
+    fn drain(pipe: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            if let Some(mut p) = pipe {
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = p.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    let room = EVAL_CAPTURE_LIMIT.saturating_sub(kept.len());
+                    kept.extend_from_slice(&buf[..n.min(room)]);
+                }
+            }
+            kept
+        })
+    }
+    let out_t = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err_t = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+
     let start = std::time::Instant::now();
-    let status = loop {
-        if let Some(st) = child.try_wait()? {
-            break Some(st);
+    let mut status = None;
+    let mut exited_at: Option<std::time::Instant> = None;
+    let timed_out = loop {
+        if status.is_none()
+            && let Some(st) = child.try_wait()?
+        {
+            status = Some(st);
+            exited_at = Some(std::time::Instant::now());
+        }
+        if status.is_some() && out_t.is_finished() && err_t.is_finished() {
+            break false;
         }
         if timeout.is_some_and(|t| start.elapsed() >= t) {
+            break true;
+        }
+        // No timeout configured: still stop background children that outlive the shell.
+        if timeout.is_none() && exited_at.is_some_and(|t| t.elapsed() >= EVAL_DRAIN_GRACE) {
             kill_process_tree(&mut child);
-            let _ = child.wait();
-            break None;
+            break false;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
+    if timed_out {
+        kill_process_tree(&mut child);
+        let _ = child.wait();
+    }
     let stdout = out_t.join().unwrap_or_default();
     let stderr = err_t.join().unwrap_or_default();
+    if timed_out {
+        return Ok(None);
+    }
     Ok(status.map(|status| std::process::Output {
         status,
         stdout,
@@ -3573,6 +3752,141 @@ mod tests {
         store.revoke_eval_approval("1").unwrap();
         let reviewed = store.submit_for_review("1", "claude", None, None).unwrap();
         assert_eq!(reviewed.meta.status, TaskStatus::PendingClose);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ---- Findings from the independent Codex review (and one found while reproducing it) ----
+
+    /// RED (Codex F5): a blocker whose card was deleted counted as closed, so claim failed open.
+    #[test]
+    fn test_missing_blocker_keeps_the_task_blocked() {
+        let (store, tmp) = hardening_store("missing-blocker");
+        store.add_task("p1 top", None, vec![], None, None).unwrap();
+        store.add_task("p1 base", None, vec![], None, None).unwrap();
+        store.add_dependency("1", &["2".to_string()]).unwrap();
+        fs::remove_file(store.find_task("2").unwrap().path).unwrap();
+        let err = store
+            .claim_task("1", "claude", None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tk-002") && err.contains("missing"), "{}", err);
+        assert!(store.submit_for_review("1", "claude", None, None).is_err());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (found reproducing F5): deleting or archiving the newest card let `add` reuse its id,
+    /// so old references and history silently pointed at a different task.
+    #[test]
+    fn test_ids_are_never_reused_after_delete_or_archive() {
+        let (store, tmp) = hardening_store("id-reuse");
+        for t in ["p1 a", "p1 b", "p1 c"] {
+            store.add_task(t, None, vec![], None, None).unwrap();
+        }
+        fs::remove_file(store.find_task("3").unwrap().path).unwrap();
+        assert_eq!(
+            store
+                .add_task("p1 d", None, vec![], None, None)
+                .unwrap()
+                .meta
+                .id,
+            "tk-004"
+        );
+        store
+            .complete_task_with("4", "ken", None, Approval::Interactive)
+            .unwrap();
+        store.archive_tasks(Some("4")).unwrap();
+        assert_eq!(
+            store
+                .add_task("p1 e", None, vec![], None, None)
+                .unwrap()
+                .meta
+                .id,
+            "tk-005"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Codex F7): without git the receipt silently had no snapshot.
+    #[test]
+    fn test_receipt_says_why_there_is_no_snapshot() {
+        let (store, tmp) = hardening_store("no-snapshot");
+        store
+            .add_task("p1 work", None, vec![], Some("exit 0".to_string()), None)
+            .unwrap();
+        let r = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap()
+            .meta
+            .receipt
+            .unwrap();
+        assert!(r.snapshot.is_none());
+        assert_eq!(r.snapshot_note.as_deref(), Some("not a git repository"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Codex F1: hand-edited cards could claim `done` or an approval with no matching event.
+    /// tkmd cannot stop an agent that writes the store, but `tk doctor` must notice.
+    #[test]
+    fn test_doctor_flags_cards_the_event_log_does_not_explain() {
+        let (store, tmp) = hardening_store("doctor");
+        store
+            .add_task("p1 honest", None, vec![], None, None)
+            .unwrap();
+        store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
+        store
+            .add_task("p1 forged done", None, vec![], None, None)
+            .unwrap();
+        store
+            .add_task(
+                "p1 forged approval",
+                None,
+                vec![],
+                Some("true".to_string()),
+                None,
+            )
+            .unwrap();
+        assert!(
+            store.integrity_report().unwrap().is_empty(),
+            "clean store must pass"
+        );
+
+        let p2 = store.find_task("2").unwrap().path;
+        fs::write(
+            &p2,
+            fs::read_to_string(&p2)
+                .unwrap()
+                .replace("status: ready", "status: done"),
+        )
+        .unwrap();
+        let p3 = store.find_task("3").unwrap().path;
+        fs::write(
+            &p3,
+            fs::read_to_string(&p3).unwrap().replacen(
+                "eval: 'true'",
+                "eval: 'true'\napproved_eval: 'true'",
+                1,
+            ),
+        )
+        .unwrap();
+
+        let report = store.integrity_report().unwrap().join("\n");
+        assert!(
+            report.contains("tk-002") && report.contains("done"),
+            "{}",
+            report
+        );
+        assert!(
+            report.contains("tk-003") && report.contains("approv"),
+            "{}",
+            report
+        );
+        assert!(
+            !report.contains("tk-001"),
+            "honest card flagged: {}",
+            report
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }

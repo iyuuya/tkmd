@@ -125,6 +125,9 @@ pub struct TaskFrontmatter {
 pub struct ReviewReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
+    /// Why there is no snapshot (e.g. `not a git repository`, `git unavailable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval: Option<String>,
     /// `passed` or `no-eval`

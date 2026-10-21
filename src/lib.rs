@@ -348,6 +348,9 @@ enum Commands {
         #[arg(long)]
         color: bool,
     },
+    /// Check every card against the event log; exit 1 if a card's state was not recorded
+    /// (for example a card hand-edited to `done`)
+    Doctor,
     /// Approve a task's eval so the task closes itself when that check passes on submit.
     /// Human-only: run it at a terminal. `--off` returns the task(s) to manual sign-off.
     Auto {
@@ -1350,10 +1353,17 @@ pub fn run() -> Result<()> {
                     Some("no-eval") => format!("{ORANGE}no eval ran{RESET}"),
                     _ => "eval passed".to_string(),
                 };
-                println!(
-                    "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` ({}){}: {}",
-                    card.meta.id, eval_note, sess_info, card.meta.title
-                );
+                if card.meta.status == TaskStatus::Done {
+                    println!(
+                        "{GREEN}⚡ Auto-accepted{RESET} {BOLD}{}{RESET} (`done`): its approved eval passed: {}",
+                        card.meta.id, card.meta.title
+                    );
+                } else {
+                    println!(
+                        "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` ({}){}: {}",
+                        card.meta.id, eval_note, sess_info, card.meta.title
+                    );
+                }
             } else {
                 print_review_dashboard(&store)?;
             }
@@ -2367,6 +2377,17 @@ pub fn run() -> Result<()> {
                         color_status(&updated.meta.status).trim()
                     );
                 }
+            }
+        }
+        Commands::Doctor => {
+            let issues = store.integrity_report()?;
+            if issues.is_empty() {
+                println!("{GREEN}✓ Every card matches the event log{RESET}");
+            } else {
+                for i in &issues {
+                    println!("{RED}✖{RESET} {}", i);
+                }
+                anyhow::bail!("{} integrity issue(s)", issues.len());
             }
         }
         Commands::Auto { ids, off } => {

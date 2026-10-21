@@ -3,6 +3,9 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, Read, Write};
 
+/// Default `task_list` page size: enough to pick work, small enough for an agent context.
+const DEFAULT_LIST_LIMIT: usize = 100;
+
 /// Runs a Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio.
 /// Supports BOTH newline-delimited JSON-RPC and LSP-style `Content-Length:` framed JSON-RPC
 /// so every agent (Claude Code, Codex, Pi, OpenCode, Goose, Gemini, Cursor) works out of the box.
@@ -41,176 +44,8 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
                 (trimmed.to_string(), false)
             };
 
-        let req: Value = match serde_json::from_str(&payload) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let id = req.get("id").cloned();
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
-
-        if id.is_none() {
+        let Some(response) = handle_message(store, &payload) else {
             continue;
-        }
-
-        let response = match method {
-            "initialize" => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": {
-                        "name": "tkmd",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }
-            }),
-            "ping" => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {}
-            }),
-            "tools/list" => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "tools": [
-                        {
-                            "name": "task_list",
-                            "description": "List tasks across local project repository and/or central global vault with optional status, owner, or scope filter. Returns compact summaries (no body); use task_get for one full card or detail='full' for all.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "detail": { "type": "string", "enum": ["summary", "full"], "description": "summary (default): id, title, status, owner, priority, project, due, blockers, eval state, auto-accept, resume. full: complete cards including body." },
-                                    "limit": { "type": "integer", "minimum": 1, "description": "Return at most this many tasks (sorted by id)" },
-                                    "owner": { "type": "string", "description": "Filter by owner (e.g. ken, hermes, pi, codex)" },
-                                    "status": { "type": "string", "description": "Filter by status (inbox, ready, in-progress, pending-close, blocked, done)" },
-                                    "scope": { "type": "string", "enum": ["local", "global", "all"], "description": "Filter by task scope: 'local' (repository project backlog), 'global' (central vault backlog), or 'all' (merged)" }
-                                }
-                            }
-                        },
-                        {
-                            "name": "task_get",
-                            "description": "Get one task as a full card (frontmatter, body, execution log, sessions, review receipt).",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "id": { "type": "string", "description": "Task ID (e.g. 7 or tk-007)" }
-                                },
-                                "required": ["id"]
-                            }
-                        },
-                        {
-                            "name": "task_add",
-                            "description": "Create a new task with todo.txt shorthand, Definition of Done (dod), optional shell eval command, and optional agent session_id.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "shorthand": { "type": "string", "description": "todo.txt formatted string" },
-                                    "details": { "type": "string", "description": "Optional markdown description" },
-                                    "dod": { "type": "array", "items": { "type": "string" }, "description": "Definition of Done checklist items" },
-                                    "eval": { "type": "string", "description": "Shell command to verify completion (exit 0 = pass)" },
-                                    "session_id": { "type": "string", "description": "Agent session ID or full resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" }
-                                },
-                                "required": ["shorthand"]
-                            }
-                        },
-                        {
-                            "name": "task_claim",
-                            "description": "Claim a task, attach your agent session_id for easy resume, and transition status to in-progress. Refuses tasks another owner is working on, tasks under review, and closed tasks unless force is true.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
-                                    "owner": { "type": "string", "description": "Agent or human claiming the task (e.g. claude, codex, hermes, pi)" },
-                                    "session_id": { "type": "string", "description": "Agent session ID or resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" },
-                                    "force": { "type": "boolean", "description": "Take over a task another owner is working on, or pull it back from review. Recorded in the log." }
-                                },
-                                "required": ["id", "owner"]
-                            }
-                        },
-                        {
-                            "name": "task_eval",
-                            "description": "Run the automated verification (eval) command for a task and record pass/fail.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
-                                    "actor": { "type": "string", "description": "Agent running the eval" }
-                                },
-                                "required": ["id"]
-                            }
-                        },
-                        {
-                            "name": "task_submit_review",
-                            "description": "Run eval and transition task to pending-close for Ken's final sign-off.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
-                                    "actor": { "type": "string", "description": "Agent submitting the task" },
-                                    "note": { "type": "string", "description": "Summary of work or [[wikilink]] to artifact" },
-                                    "session_id": { "type": "string", "description": "Agent session ID or resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" }
-                                },
-                                "required": ["id"]
-                            }
-                        },
-                        {
-                            "name": "task_complete",
-                            "description": "Finish your work on a task. Agents cannot mark tasks done: this runs eval and submits to pending-close for human sign-off. It fails if the task is already awaiting sign-off.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
-                                    "actor": { "type": "string", "description": "Who completed the task" },
-                                    "note": { "type": "string", "description": "Optional summary or [[wikilink]] to output artifact" }
-                                },
-                                "required": ["id"]
-                            }
-                        },
-                        {
-                            "name": "task_cpm",
-                            "description": "Calculate Critical Path Method (CPM) metrics (ES, EF, LS, LF, Buffer, project duration, critical path) for active tasks without diagrams.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {}
-                            }
-                        }
-                    ]
-                }
-            }),
-            "tools/call" => {
-                let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let args = params
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let tool_res = handle_tool_call(store, tool_name, &args);
-                match tool_res {
-                    Ok(text) => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "content": [{ "type": "text", "text": text }]
-                        }
-                    }),
-                    Err(err) => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "isError": true,
-                            "content": [{ "type": "text", "text": format!("Error: {}", err) }]
-                        }
-                    }),
-                }
-            }
-            _ => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {}
-            }),
         };
 
         let out_str = serde_json::to_string(&response)?;
@@ -228,6 +63,188 @@ pub fn run_mcp_server(store: &TaskStore) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Handle one JSON-RPC message. Returns the response to send, or `None` for notifications.
+/// Malformed JSON gets a -32700 parse error and unknown methods a -32601 error, so a client
+/// never waits on a request the server silently dropped.
+fn handle_message(store: &TaskStore, payload: &str) -> Option<Value> {
+    let req: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": { "code": -32700, "message": format!("Parse error: {}", e) }
+            }));
+        }
+    };
+
+    // Notifications (no id) never get a response.
+    let id = req.get("id").cloned()?;
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
+
+    let response = match method {
+        "initialize" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": {
+                    "name": "tkmd",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }),
+        "ping" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        }),
+        "tools/list" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "tools": [
+                    {
+                        "name": "task_list",
+                        "description": "List tasks across local project repository and/or central global vault with optional status, owner, or scope filter. Returns {tasks, total, next_offset}: compact summaries (no body), 100 per page by default. Use task_get for one full card.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "detail": { "type": "string", "enum": ["summary", "full"], "description": "summary (default): id, title, status, owner, priority, project, due, blockers, eval state, auto-accept, resume. full: complete cards including body." },
+                                "limit": { "type": "integer", "minimum": 1, "description": "Page size (default 100, sorted by id)" },
+                                "offset": { "type": "integer", "minimum": 0, "description": "Skip this many tasks; pass the previous page's next_offset" },
+                                "owner": { "type": "string", "description": "Filter by owner (e.g. ken, hermes, pi, codex)" },
+                                "status": { "type": "string", "description": "Filter by status (inbox, ready, in-progress, pending-close, blocked, done)" },
+                                "scope": { "type": "string", "enum": ["local", "global", "all"], "description": "Filter by task scope: 'local' (repository project backlog), 'global' (central vault backlog), or 'all' (merged)" }
+                            }
+                        }
+                    },
+                    {
+                        "name": "task_get",
+                        "description": "Get one task as a full card (frontmatter, body, execution log, sessions, review receipt).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Task ID (e.g. 7 or tk-007)" }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    {
+                        "name": "task_add",
+                        "description": "Create a new task with todo.txt shorthand, Definition of Done (dod), optional shell eval command, and optional agent session_id.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "shorthand": { "type": "string", "description": "todo.txt formatted string" },
+                                "details": { "type": "string", "description": "Optional markdown description" },
+                                "dod": { "type": "array", "items": { "type": "string" }, "description": "Definition of Done checklist items" },
+                                "eval": { "type": "string", "description": "Shell command to verify completion (exit 0 = pass)" },
+                                "session_id": { "type": "string", "description": "Agent session ID or full resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" }
+                            },
+                            "required": ["shorthand"]
+                        }
+                    },
+                    {
+                        "name": "task_claim",
+                        "description": "Claim a task, attach your agent session_id for easy resume, and transition status to in-progress. Refuses tasks another owner is working on, tasks under review, and closed tasks unless force is true.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
+                                "owner": { "type": "string", "description": "Agent or human claiming the task (e.g. claude, codex, hermes, pi)" },
+                                "session_id": { "type": "string", "description": "Agent session ID or resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" },
+                                "force": { "type": "boolean", "description": "Take over a task another owner is working on, or pull it back from review. Recorded in the log." }
+                            },
+                            "required": ["id", "owner"]
+                        }
+                    },
+                    {
+                        "name": "task_eval",
+                        "description": "Run the automated verification (eval) command for a task and record pass/fail.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
+                                "actor": { "type": "string", "description": "Agent running the eval" }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    {
+                        "name": "task_submit_review",
+                        "description": "Run eval and transition task to pending-close for Ken's final sign-off.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
+                                "actor": { "type": "string", "description": "Agent submitting the task" },
+                                "note": { "type": "string", "description": "Summary of work or [[wikilink]] to artifact" },
+                                "session_id": { "type": "string", "description": "Agent session ID or resume command (e.g. '8y9380573586' or 'claude -r 8y9380573586')" }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    {
+                        "name": "task_complete",
+                        "description": "Finish your work on a task. Agents cannot mark tasks done: this runs eval and submits to pending-close for human sign-off. It fails if the task is already awaiting sign-off.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Task ID (e.g. tk-001)" },
+                                "actor": { "type": "string", "description": "Who completed the task" },
+                                "note": { "type": "string", "description": "Optional summary or [[wikilink]] to output artifact" }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    {
+                        "name": "task_cpm",
+                        "description": "Calculate Critical Path Method (CPM) metrics (ES, EF, LS, LF, Buffer, project duration, critical path) for active tasks without diagrams.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    }
+                ]
+            }
+        }),
+        "tools/call" => {
+            let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let tool_res = handle_tool_call(store, tool_name, &args);
+            match tool_res {
+                Ok(text) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{ "type": "text", "text": text }]
+                    }
+                }),
+                Err(err) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "isError": true,
+                        "content": [{ "type": "text", "text": format!("Error: {}", err) }]
+                    }
+                }),
+            }
+        }
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("Method not found: {}", method) }
+        }),
+    };
+    Some(response)
 }
 
 /// What an agent needs to pick and route work, without the card body. Empty fields are omitted.
@@ -283,17 +300,27 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
                     });
                     owner_ok && status_ok && scope_ok
                 })
-                .take(
-                    args.get("limit")
-                        .and_then(|v| v.as_u64())
-                        .map_or(usize::MAX, |n| n as usize),
-                )
                 .collect();
-            if args.get("detail").and_then(|v| v.as_str()) == Some("full") {
-                return Ok(serde_json::to_string_pretty(&filtered)?);
-            }
-            let summaries: Vec<Value> = filtered.iter().map(card_summary).collect();
-            Ok(serde_json::to_string(&summaries)?)
+            let total = filtered.len();
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map_or(DEFAULT_LIST_LIMIT, |n| n as usize);
+            let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
+            let next_offset = (offset + page.len() < total).then_some(offset + page.len());
+            let tasks: Vec<Value> = if args.get("detail").and_then(|v| v.as_str()) == Some("full") {
+                page.iter()
+                    .map(serde_json::to_value)
+                    .collect::<serde_json::Result<_>>()?
+            } else {
+                page.iter().map(card_summary).collect()
+            };
+            Ok(serde_json::to_string(&json!({
+                "tasks": tasks,
+                "total": total,
+                "next_offset": next_offset
+            }))?)
         }
         "task_get" => {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -520,7 +547,7 @@ mod tests {
         }
         let res = handle_tool_call(&store, "task_list", &json!({})).unwrap();
         let list: Value = serde_json::from_str(&res).unwrap();
-        let items = list.as_array().unwrap();
+        let items = list["tasks"].as_array().unwrap();
         assert_eq!(items.len(), 5);
         for item in items {
             assert!(
@@ -533,13 +560,13 @@ mod tests {
                 assert!(item.get(key).is_some(), "summary missing {}: {}", key, item);
             }
         }
-        let per_card = res.len() / items.len();
+        let per_card = serde_json::to_string(&list["tasks"]).unwrap().len() / items.len();
         assert!(per_card < 400, "summary is {} bytes per card", per_card);
 
         let full = handle_tool_call(&store, "task_list", &json!({"detail": "full"})).unwrap();
         let full: Value = serde_json::from_str(&full).unwrap();
         assert!(
-            full[0].get("body").is_some(),
+            full["tasks"][0].get("body").is_some(),
             "detail=full must include the body"
         );
         let _ = fs::remove_dir_all(&tmp);
@@ -569,13 +596,57 @@ mod tests {
         }
         let res = handle_tool_call(&store, "task_list", &json!({"limit": 2})).unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&res)
-                .unwrap()
+            serde_json::from_str::<Value>(&res).unwrap()["tasks"]
                 .as_array()
                 .unwrap()
                 .len(),
             2
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Codex F9): malformed JSON got no response and unknown methods returned success.
+    #[test]
+    fn test_protocol_errors_are_reported() {
+        let (store, tmp) = setup_test_store("protocol");
+        let bad = handle_message(&store, "{not json").expect("parse errors need a response");
+        assert_eq!(bad["error"]["code"], -32700);
+        assert!(bad["id"].is_null());
+        let unknown =
+            handle_message(&store, r#"{"jsonrpc":"2.0","id":7,"method":"no/such"}"#).unwrap();
+        assert_eq!(unknown["error"]["code"], -32601);
+        assert_eq!(unknown["id"], 7);
+        assert!(
+            handle_message(
+                &store,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+            )
+            .is_none()
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Codex F8): an unbounded default list cost megabytes on large stores.
+    #[test]
+    fn test_task_list_is_paged_by_default() {
+        let (store, tmp) = setup_test_store("paged");
+        for i in 0..130 {
+            store
+                .add_task(&format!("p1 t{}", i), None, vec![], None, None)
+                .unwrap();
+        }
+        let page: Value =
+            serde_json::from_str(&handle_tool_call(&store, "task_list", &json!({})).unwrap())
+                .unwrap();
+        assert_eq!(page["total"], 130);
+        assert_eq!(page["tasks"].as_array().unwrap().len(), 100);
+        assert_eq!(page["next_offset"], 100);
+        let rest: Value = serde_json::from_str(
+            &handle_tool_call(&store, "task_list", &json!({"offset": 100})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rest["tasks"].as_array().unwrap().len(), 30);
+        assert!(rest["next_offset"].is_null());
         let _ = fs::remove_dir_all(&tmp);
     }
 }
