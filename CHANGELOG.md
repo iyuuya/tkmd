@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changing `eval` on a `pending-close` task moves it back to `in-progress`; the card records the eval at claim time so the sign-off prompt can show a changed check.
 
 ### Fixed
+- From the Sourcery review of PR #1 (each covered by a test that failed first):
+  - Archiving a done blocker made its dependents blocked again (a regression from the missing-blocker fix): blocker lookups now include the archive.
+  - `tk archive 1` and `tk prune 1` matched nothing: the id filter now accepts `1`, `tk-1` and `tk-001`.
+  - `tk d` approved whatever receipt the card held when it wrote, even one an agent re-submitted while the prompt was open. Approval is now bound to the receipt shown, and every decision is made on the card read under its lock.
+  - A blocker added to a `pending-close` task did not stop its approval.
+  - Files changed by the eval itself, or while it ran, were receipted: submit now snapshots before and after the eval.
+  - A Definition of Done change after submit left the review valid; `eval: ""` passed `require_eval`.
+  - `claim` could pass the blocker check while `tk dep` added a blocker: claims now take the graph lock.
+  - A failing daily-note write returned before the unblock cascade, and cascade write errors were ignored. Both are now warnings that do not skip later work.
+  - A global task closed through the local store did not unblock its global dependents: transitions now run in the store that owns the card.
+  - Duplicate ids in `tk d 1 tk-001`, MCP `limit: 0` paging forever, and an unrecorded forced take-back from review.
+  - MCP requests that are not objects, or have no `method`, get `-32600`.
+  - When local and global stores configure different owners, only the first counted as human.
+  - `tk doctor` also checks archived cards and flags `blocked` tasks whose blockers are all closed.
 - From an independent Codex review (each reproduced first, then covered by a failing test):
   - Concurrent `tk dep` commands each validated against the same old graph and together committed a cycle; dependency edits now run under a store-wide lock.
   - A background child (`sleep 4 &`) kept the eval's output open past `eval_timeout_secs` and the eval then passed; the deadline now covers the whole process group and output collection, and captured output is capped at 1 MiB per stream.

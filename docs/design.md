@@ -152,6 +152,10 @@ tkmd protects against agents that are sloppy or over-eager but work through `tk`
 | Fake a terminal to answer the sign-off prompt | No | No |
 | Change the script or tests behind an approved `tk auto` eval | No | Partly: the receipt snapshot changes |
 | Edit `.events.jsonl` as well as the card | No | No |
+| Pass another agent's name to `--owner`/`--actor`, or `force` through MCP | No | The event log records it |
+| Change a gitignored file the eval depends on | No | No: the snapshot covers tracked and untracked, not ignored, files |
+
+Multi-file updates (a card plus its event, or both ends of a dependency) are not atomic: a crash between the writes can leave them out of step. `tk doctor` reports the cases it can see. Windows has no process-group kill, so an eval's background children can outlive its timeout there.
 
 For adversarial settings, take the store out of the agent's reach: give agents MCP only, and run `tk mcp` as a separate OS user (or in a sandbox) that owns the task directory, so the agent cannot write cards or events. Approve with `tk auto` only evals the agent cannot change, such as a CI job or a test suite outside its working tree.
 

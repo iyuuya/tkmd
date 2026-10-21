@@ -80,8 +80,22 @@ fn handle_message(store: &TaskStore, payload: &str) -> Option<Value> {
         }
     };
 
+    if !req.is_object() {
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32600, "message": "Invalid Request: expected a JSON-RPC object" }
+        }));
+    }
     // Notifications (no id) never get a response.
     let id = req.get("id").cloned()?;
+    if !req.get("method").is_some_and(|m| m.is_string()) {
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32600, "message": "Invalid Request: `method` must be a string" }
+        }));
+    }
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
 
@@ -307,6 +321,9 @@ fn handle_tool_call(store: &TaskStore, name: &str, args: &Value) -> Result<Strin
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .map_or(DEFAULT_LIST_LIMIT, |n| n as usize);
+            if limit == 0 {
+                anyhow::bail!("limit must be at least 1");
+            }
             let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
             let next_offset = (offset + page.len() < total).then_some(offset + page.len());
             let tasks: Vec<Value> = if args.get("detail").and_then(|v| v.as_str()) == Some("full") {
@@ -647,6 +664,20 @@ mod tests {
         .unwrap();
         assert_eq!(rest["tasks"].as_array().unwrap().len(), 30);
         assert!(rest["next_offset"].is_null());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #24, #25): limit 0 paged forever; structurally invalid requests got no error.
+    #[test]
+    fn test_invalid_paging_and_requests_are_errors() {
+        let (store, tmp) = setup_test_store("invalid");
+        store.add_task("p1 a", None, vec![], None, None).unwrap();
+        assert!(handle_tool_call(&store, "task_list", &json!({"limit": 0})).is_err());
+        let no_method = handle_message(&store, r#"{"jsonrpc":"2.0","id":3}"#).unwrap();
+        assert_eq!(no_method["error"]["code"], -32600);
+        assert_eq!(no_method["id"], 3);
+        let not_object = handle_message(&store, "[1,2]").unwrap();
+        assert_eq!(not_object["error"]["code"], -32600);
         let _ = fs::remove_dir_all(&tmp);
     }
 }

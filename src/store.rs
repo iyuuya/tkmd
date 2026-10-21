@@ -1156,6 +1156,37 @@ views:
         None
     }
 
+    /// An archived card (`tasks/archive/<id>-*.md`) here or in the peer store.
+    fn find_archived(&self, id: &str) -> Option<TaskCard> {
+        let id = normalize_id(id)?;
+        let prefix = format!("{}-", id);
+        let mut dirs = vec![self.tasks_path.join("archive")];
+        if let Some(peer) = &self.peer {
+            dirs.push(peer.tasks_path.join("archive"));
+        }
+        for dir in dirs {
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with(&prefix)
+                    && name.ends_with(".md")
+                    && let Ok(card) = Self::read_card(&entry.path())
+                    && card.meta.id.eq_ignore_ascii_case(&id)
+                {
+                    return Some(card);
+                }
+            }
+        }
+        None
+    }
+
+    /// Status of a blocker by id: live card, then archive. `None` means no card exists.
+    fn blocker_status(&self, id: &str) -> Option<TaskStatus> {
+        self.find_task(id)
+            .ok()
+            .map(|c| c.meta.status)
+            .or_else(|| self.find_archived(id).map(|_| TaskStatus::Archived))
+    }
+
     /// Highest `tk-NNN` number among card file names in `dir` (no card parsing).
     fn max_id_in_dir(dir: &Path) -> u32 {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -1239,6 +1270,10 @@ views:
         session_id: Option<String>,
         force: bool,
     ) -> Result<TaskCard> {
+        // The graph lock keeps a claim from passing the blocker check while `tk dep` is adding
+        // a new blocker to the same task.
+        fs::create_dir_all(&self.tasks_path)?;
+        let _graph_lock = Self::lock_card(&self.tasks_path)?;
         let found = self.find_task(query)?;
         let _lock = Self::lock_card(Path::new(&found.path))?;
         let mut card = Self::read_card(Path::new(&found.path))?;
@@ -1284,6 +1319,8 @@ views:
                 " (forced takeover from `{}`, was `{}`)",
                 card.meta.owner, prev
             )
+        } else if force && prev == "pending-close" {
+            " (forced take-back from review)".to_string()
         } else {
             String::new()
         };
@@ -1338,7 +1375,7 @@ views:
         }
         let mut open = Vec::new();
         for bid in &card.meta.blocked_by {
-            let status = self.find_task(bid).ok().map(|c| c.meta.status);
+            let status = self.blocker_status(bid);
             match status {
                 Some(TaskStatus::Done | TaskStatus::Archived) => {}
                 Some(_) => open.push(bid.clone()),
@@ -1377,7 +1414,7 @@ views:
     fn eval_card(&self, card: &mut TaskCard, actor: &str) -> Result<(bool, String)> {
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
 
-        let Some(cmd_str) = card.meta.eval.clone() else {
+        let Some(cmd_str) = card.meta.eval.clone().filter(|e| !e.trim().is_empty()) else {
             card.meta.eval_status = Some("passed (no-eval)".to_string());
             return Ok((true, "No eval command configured (auto-pass)".to_string()));
         };
@@ -1476,6 +1513,9 @@ views:
         session_id: Option<String>,
     ) -> Result<TaskCard> {
         let found = self.find_task(query)?;
+        if let Some(peer) = self.owning_peer(&found) {
+            return peer.submit_for_review(&found.meta.id, actor, note, session_id);
+        }
         let _lock = Self::lock_card(Path::new(&found.path))?;
         let mut card = Self::read_card(Path::new(&found.path))?;
         card.scope = found.scope;
@@ -1506,7 +1546,7 @@ views:
                 card.meta.id
             );
         }
-        if self.config.policy.require_eval && card.meta.eval.is_none() {
+        if self.config.policy.require_eval && !has_eval(&card) {
             bail!(
                 "Cannot submit {}: [policy].require_eval is on and the task has no eval command. Add one with `tk set {} --eval '<cmd>'`",
                 card.meta.id,
@@ -1515,6 +1555,8 @@ views:
         }
 
         let prev = card.meta.status.as_str().to_string();
+        // Snapshot before and after the eval: the receipt must describe what the eval tested.
+        let (before, _) = self.snapshot_with_note();
         let (passed, eval_out) = self.eval_card(&mut card, actor)?;
         if !passed {
             self.write_card(&card)?;
@@ -1541,6 +1583,14 @@ views:
             .or_else(Self::detect_env_session_id);
         Self::record_session_on_card(&mut card, actor, resolved_sid.as_deref());
         let (snapshot, snapshot_note) = self.snapshot_with_note();
+        if before.is_some() && before != snapshot {
+            self.write_card(&card)?;
+            bail!(
+                "Cannot submit {}: the output changed while the eval ran (the eval or another process edited files). Re-run `tk r {}` once nothing is changing",
+                card.meta.id,
+                card.meta.id
+            );
+        }
         if let Some(note) = snapshot_note.as_deref()
             && note != "not a git repository"
         {
@@ -1553,16 +1603,11 @@ views:
             snapshot,
             snapshot_note,
             eval: card.meta.eval.clone(),
-            eval_result: if card.meta.eval.is_some() {
-                "passed"
-            } else {
-                "no-eval"
-            }
-            .to_string(),
+            eval_result: if has_eval(&card) { "passed" } else { "no-eval" }.to_string(),
             submitted_by: actor.to_string(),
             submitted_at: Local::now().to_rfc3339(),
         });
-        let auto_accept = card.meta.eval.is_some() && card.meta.approved_eval == card.meta.eval;
+        let auto_accept = has_eval(&card) && card.meta.approved_eval == card.meta.eval;
         card.meta.status = TaskStatus::PendingClose;
         card.meta.updated = Local::now().format("%Y-%m-%d").to_string();
         let suffix = match note {
@@ -1609,9 +1654,9 @@ views:
                 Some(true),
                 &card.meta.title,
             )?;
-            self.log_to_daily_note(&card, note)?;
             drop(_lock);
             self.cascade_unblock(&card.meta.id, &today, &now_ts)?;
+            self.note_completion(&card, note);
             return Ok(card);
         }
 
@@ -1648,7 +1693,7 @@ views:
                 card.meta.status.as_str()
             );
         }
-        let Some(eval) = card.meta.eval.clone() else {
+        let Some(eval) = card.meta.eval.clone().filter(|e| !e.trim().is_empty()) else {
             bail!(
                 "{} has no eval to approve. Add one first: `tk set {} --eval '<cmd>'`",
                 card.meta.id,
@@ -1723,31 +1768,60 @@ views:
         note: Option<&str>,
         approval: Approval,
     ) -> Result<TaskCard> {
-        let card_check = self.find_task(query)?;
+        self.complete_task_confirmed(query, actor, note, approval, None)
+    }
+
+    /// Like `complete_task_with`, but refuses if the card's review receipt is no longer the one
+    /// the human was shown (`expected`), e.g. because an agent re-submitted during the prompt.
+    /// Every decision is made on the card as read under its lock.
+    pub fn complete_task_confirmed(
+        &self,
+        query: &str,
+        actor: &str,
+        note: Option<&str>,
+        approval: Approval,
+        expected: Option<&ReviewReceipt>,
+    ) -> Result<TaskCard> {
+        let found = self.find_task(query)?;
+        if let Some(peer) = self.owning_peer(&found) {
+            return peer.complete_task_confirmed(&found.meta.id, actor, note, approval, expected);
+        }
         let owner = self.config.default_owner.clone();
 
+        let lock = Self::lock_card(Path::new(&found.path))?;
+        let mut card = Self::read_card(Path::new(&found.path))?;
+        card.scope = found.scope;
+        let prev = card.meta.status.as_str().to_string();
+
         if approval == Approval::Untrusted {
-            if card_check.meta.status == TaskStatus::PendingClose {
+            drop(lock);
+            if card.meta.status == TaskStatus::PendingClose {
                 bail!(
                     "{} is awaiting human sign-off. Only `tk done {}` run by a person at an interactive terminal can close it",
-                    card_check.meta.id,
-                    card_check.meta.id
+                    card.meta.id,
+                    card.meta.id
                 );
             }
             return self.submit_for_review(query, actor, note, None);
         }
 
         // Agent-owned work goes through review first, even when a human closes it.
-        if !card_check.meta.owner.eq_ignore_ascii_case(&owner)
-            && card_check.meta.status != TaskStatus::PendingClose
+        if !card.meta.owner.eq_ignore_ascii_case(&owner)
+            && card.meta.status != TaskStatus::PendingClose
+            && !matches!(card.meta.status, TaskStatus::Done | TaskStatus::Archived)
         {
-            return self.submit_for_review(query, &card_check.meta.owner, note, None);
+            drop(lock);
+            return self.submit_for_review(query, &card.meta.owner, note, None);
         }
 
-        let lock = Self::lock_card(Path::new(&card_check.path))?;
-        let mut card = Self::read_card(Path::new(&card_check.path))?;
-        card.scope = card_check.scope;
-        let prev = card.meta.status.as_str().to_string();
+        let open = self.open_blockers(&card)?;
+        if !open.is_empty() {
+            bail!(
+                "Cannot close {}: still blocked by open task(s): {}",
+                card.meta.id,
+                open.join(", ")
+            );
+        }
 
         match card.meta.status {
             TaskStatus::Done | TaskStatus::Archived => {
@@ -1760,6 +1834,16 @@ views:
                         card.meta.id, card.meta.id
                     )
                 })?;
+                if let Some(shown) = expected
+                    && *shown != receipt
+                {
+                    bail!(
+                        "Cannot approve {}: it changed since you reviewed it (re-submitted at {}). Run `tk d {}` again to see the new receipt",
+                        card.meta.id,
+                        receipt.submitted_at,
+                        card.meta.id
+                    );
+                }
                 if receipt.eval != card.meta.eval {
                     bail!(
                         "Cannot approve {}: the eval command changed after it was submitted. Re-submit with `tk review {}`",
@@ -1777,7 +1861,7 @@ views:
                 }
             }
             _ => {
-                if self.config.policy.require_eval && card.meta.eval.is_none() {
+                if self.config.policy.require_eval && !has_eval(&card) {
                     bail!(
                         "Cannot close {}: [policy].require_eval is on and the task has no eval command",
                         card.meta.id
@@ -1835,11 +1919,30 @@ views:
             Some(true),
             &card.meta.title,
         )?;
-        self.log_to_daily_note(&card, note)?;
         drop(lock);
 
         self.cascade_unblock(&card.meta.id, &today, &now_ts)?;
+        self.note_completion(&card, note);
         Ok(card)
+    }
+
+    /// The peer store that owns `card`, when it was found through this store's peer. Lifecycle
+    /// transitions run in the owning store so its cascade and event log see them.
+    fn owning_peer(&self, card: &TaskCard) -> Option<&TaskStore> {
+        let peer = self.peer.as_deref()?;
+        (card.scope != self.scope && Path::new(&card.path).starts_with(&peer.tasks_path))
+            .then_some(peer)
+    }
+
+    /// Daily-note entry for a completed task. The completion is already committed, so a
+    /// failure here is a warning, never an error that skips work after it.
+    fn note_completion(&self, card: &TaskCard, note: Option<&str>) {
+        if let Err(e) = self.log_to_daily_note(card, note) {
+            eprintln!(
+                "warning: {} is done, but the daily note was not updated: {:#}",
+                card.meta.id, e
+            );
+        }
     }
 
     /// Promote `blocked` tasks whose blockers are now all closed. Locks each card it rewrites.
@@ -1863,9 +1966,10 @@ views:
             if known.contains(&b) {
                 return open.contains(&b);
             }
-            !self
-                .find_task(bid)
-                .is_ok_and(|c| matches!(c.meta.status, TaskStatus::Done | TaskStatus::Archived))
+            !matches!(
+                self.blocker_status(bid),
+                Some(TaskStatus::Done | TaskStatus::Archived)
+            )
         };
         for other in all {
             if !other
@@ -1903,7 +2007,13 @@ views:
                     now_ts,
                     completed_id
                 );
-                let _ = self.write_card(&other);
+                if let Err(e) = self.write_card(&other) {
+                    eprintln!(
+                        "warning: could not unblock {}: {:#}. Run `tk doctor`",
+                        other.meta.id, e
+                    );
+                    continue;
+                }
                 let _ = self.log_event(
                     &other.meta.id,
                     "unblocked",
@@ -2044,6 +2154,12 @@ views:
                 card.body = format!("{}\n\n{}\n", card.body.trim_end(), new_dod_block);
             }
             changes.push(format!("updated {} DoD item(s)", new_dod.len()));
+            if card.meta.status == TaskStatus::PendingClose {
+                card.meta.status = TaskStatus::InProgress;
+                card.meta.receipt = None;
+                changes
+                    .push("status -> in-progress (review invalidated by DoD change)".to_string());
+            }
         }
 
         if let Some(e) = new_eval {
@@ -2367,6 +2483,30 @@ views:
                     id
                 ));
             }
+            if card.meta.status == TaskStatus::Blocked
+                && !card.meta.blocked_by.is_empty()
+                && self.open_blockers(&card)?.is_empty()
+            {
+                issues.push(format!(
+                    "{}: still `blocked` but every blocker is closed; it can be unblocked (`tk c {}`)",
+                    id, id
+                ));
+            }
+        }
+        // Archived cards were done when archived: that completion must be on record too.
+        let archive = self.tasks_path.join("archive");
+        for entry in fs::read_dir(&archive).into_iter().flatten().flatten() {
+            if entry.path().extension().is_some_and(|x| x == "md")
+                && let Ok(card) = Self::read_card(&entry.path())
+                && !events
+                    .iter()
+                    .any(|e| e.id.eq_ignore_ascii_case(&card.meta.id) && e.to_status == "done")
+            {
+                issues.push(format!(
+                    "{}: archived, but no completion was ever recorded (card edited or copied by hand?)",
+                    card.meta.id
+                ));
+            }
         }
         Ok(issues)
     }
@@ -2446,7 +2586,10 @@ views:
                 continue;
             }
             if let Some(fid) = id_filter
-                && !card.meta.id.eq_ignore_ascii_case(fid)
+                && !card
+                    .meta
+                    .id
+                    .eq_ignore_ascii_case(&normalize_id(fid).unwrap_or_else(|| fid.to_string()))
             {
                 continue;
             }
@@ -2486,7 +2629,10 @@ views:
                 continue;
             }
             if let Some(fid) = id_filter
-                && !card.meta.id.eq_ignore_ascii_case(fid)
+                && !card
+                    .meta
+                    .id
+                    .eq_ignore_ascii_case(&normalize_id(fid).unwrap_or_else(|| fid.to_string()))
             {
                 continue;
             }
@@ -2592,6 +2738,21 @@ pub fn slugify(title: &str) -> String {
         .collect::<String>()
         .trim_end_matches('-')
         .to_string()
+}
+
+/// A task has an eval only if its command is non-blank (`eval: ""` is no eval at all).
+fn has_eval(card: &TaskCard) -> bool {
+    card.meta
+        .eval
+        .as_deref()
+        .is_some_and(|e| !e.trim().is_empty())
+}
+
+/// `7`, `tk-7`, `TK-007` -> `tk-007`; `None` for anything that is not an id.
+fn normalize_id(query: &str) -> Option<String> {
+    let q = query.trim().to_lowercase();
+    let digits = q.strip_prefix("tk-").unwrap_or(&q);
+    digits.parse::<u32>().ok().map(|n| format!("tk-{:03}", n))
 }
 
 /// Report an unreadable card once per process on stderr (never stdout, which MCP uses).
@@ -3794,7 +3955,11 @@ mod tests {
         store
             .complete_task_with("4", "ken", None, Approval::Interactive)
             .unwrap();
-        store.archive_tasks(Some("4")).unwrap();
+        assert_eq!(
+            store.archive_tasks(Some("4")).unwrap().len(),
+            1,
+            "`tk archive 4` must archive tk-004"
+        );
         assert_eq!(
             store
                 .add_task("p1 e", None, vec![], None, None)
@@ -3887,6 +4052,248 @@ mod tests {
             "honest card flagged: {}",
             report
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ---- Sourcery review findings (PR #1) ----
+
+    /// RED (Sourcery #30, a regression from the missing-blocker fix): an archived, done
+    /// blocker was treated as missing, so its dependents stayed blocked.
+    #[test]
+    fn test_archived_done_blocker_does_not_block() {
+        let (store, tmp) = hardening_store("archived-blocker");
+        store.add_task("p1 base", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 top needs:1", None, vec![], None, None)
+            .unwrap();
+        store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
+        assert_eq!(
+            store.archive_tasks(Some("1")).unwrap().len(),
+            1,
+            "`tk archive 1` must archive tk-001"
+        );
+        store.claim_task("2", "claude", None, false).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #3, #28): approval must cover the receipt the human was shown, not a
+    /// newer one an agent wrote while the prompt was open.
+    #[test]
+    fn test_approval_refuses_a_receipt_changed_after_display() {
+        let (store, tmp) = hardening_store("changed-receipt");
+        store
+            .add_task("p1 work", None, vec![], Some("exit 0".to_string()), None)
+            .unwrap();
+        let shown = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap()
+            .meta
+            .receipt
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store
+            .submit_for_review("1", "claude", Some("again"), None)
+            .unwrap();
+        let err = store
+            .complete_task_confirmed("1", "ken", None, Approval::Interactive, Some(&shown))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed"), "{}", err);
+        assert_eq!(
+            store.find_task("1").unwrap().meta.status,
+            TaskStatus::PendingClose
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #10): a blocker added after submit did not stop approval.
+    #[test]
+    fn test_pending_task_with_a_new_blocker_cannot_be_approved() {
+        let (store, tmp) = hardening_store("pending-blocked");
+        store
+            .add_task("p1 work", None, vec![], Some("exit 0".to_string()), None)
+            .unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        store
+            .add_task("p1 prerequisite", None, vec![], None, None)
+            .unwrap();
+        store.add_dependency("1", &["2".to_string()]).unwrap();
+        let err = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tk-002"), "{}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #5): output changed by the eval itself (or while it ran) was receipted.
+    #[test]
+    fn test_output_changing_during_eval_is_refused() {
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("during-eval");
+        git(&tmp, &["init", "-q"]);
+        fs::write(tmp.join("work.txt"), "v1").unwrap();
+        store
+            .add_task(
+                "p1 work",
+                None,
+                vec![],
+                Some("echo more >> work.txt".to_string()),
+                None,
+            )
+            .unwrap();
+        let err = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed while the eval ran"), "{}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #8): changing the Definition of Done after submit left the review valid.
+    #[test]
+    fn test_dod_change_invalidates_review() {
+        let (store, tmp) = hardening_store("dod-change");
+        store
+            .add_task(
+                "p1 work",
+                None,
+                vec!["original".into()],
+                Some("exit 0".into()),
+                None,
+            )
+            .unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        let c = store
+            .update_task("1", None, None, None, None, vec!["weaker".into()], None)
+            .unwrap();
+        assert_eq!(c.meta.status, TaskStatus::InProgress);
+        assert!(c.meta.receipt.is_none());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #9): a blank eval passed `require_eval` and then ran as an empty command.
+    #[test]
+    fn test_blank_eval_counts_as_no_eval() {
+        let (mut store, tmp) = hardening_store("blank-eval");
+        store.config.policy.require_eval = true;
+        store
+            .add_task("p1 work", None, vec![], Some("   ".into()), None)
+            .unwrap();
+        let err = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("require_eval"), "{}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #16): a failing daily-note write returned before the unblock cascade, so the
+    /// task was done but its dependents stayed blocked.
+    #[test]
+    fn test_daily_note_failure_does_not_strand_dependents() {
+        let (mut store, tmp) = hardening_store("note-fail");
+        fs::write(tmp.join("not-a-dir"), "x").unwrap();
+        store.config.mode = "obsidian".to_string();
+        store.config.daily_dir = "not-a-dir/daily".to_string();
+        store.daily_path = tmp.join("not-a-dir/daily");
+        store.add_task("p1 base", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 top needs:1", None, vec![], None, None)
+            .unwrap();
+        let done = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
+        assert_eq!(done.meta.status, TaskStatus::Done);
+        assert_eq!(store.find_task("2").unwrap().meta.status, TaskStatus::Ready);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #26): the owner forcing their own task back from review was not recorded.
+    #[test]
+    fn test_forced_take_back_from_review_is_recorded() {
+        let (store, tmp) = hardening_store("take-back");
+        store.add_task("p1 work", None, vec![], None, None).unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        let c = store.claim_task("1", "claude", None, true).unwrap();
+        assert!(
+            c.body.contains("forced take-back from review"),
+            "{}",
+            c.body
+        );
+        assert!(
+            store
+                .read_events()
+                .unwrap()
+                .iter()
+                .any(|e| e.action == "claimed-forced")
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery #15): a global task closed through the local store did not unblock its
+    /// global dependents.
+    #[test]
+    fn test_closing_a_peer_task_cascades_in_the_peer_store() {
+        let (global, gtmp) = hardening_store("peer-global");
+        global
+            .add_task("p1 global base", None, vec![], None, None)
+            .unwrap();
+        global
+            .add_task("p1 global top needs:1", None, vec![], None, None)
+            .unwrap();
+        let (mut local, ltmp) = hardening_store("peer-local");
+        local.scope = CardScope::Local;
+        let mut global = global;
+        global.scope = CardScope::Global;
+        local.peer = Some(Box::new(global));
+        local.active_scope = ScopeSelection::Auto;
+        local
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
+        let top = local.peer.as_ref().unwrap().find_task("2").unwrap();
+        assert_eq!(top.meta.status, TaskStatus::Ready);
+        let _ = fs::remove_dir_all(&gtmp);
+        let _ = fs::remove_dir_all(&ltmp);
+    }
+
+    /// RED (Sourcery #27): doctor ignored archived cards and stuck dependents.
+    #[test]
+    fn test_doctor_checks_archive_and_stuck_dependents() {
+        let (store, tmp) = hardening_store("doctor-archive");
+        store.add_task("p1 base", None, vec![], None, None).unwrap();
+        store
+            .add_task("p1 top needs:1", None, vec![], None, None)
+            .unwrap();
+        store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
+        let p2 = store.find_task("2").unwrap().path;
+        fs::write(
+            &p2,
+            fs::read_to_string(&p2)
+                .unwrap()
+                .replace("status: ready", "status: blocked"),
+        )
+        .unwrap();
+        let arch = store.tasks_path.join("archive");
+        fs::create_dir_all(&arch).unwrap();
+        let forged = fs::read_to_string(store.find_task("1").unwrap().path)
+            .unwrap()
+            .replace("id: tk-001", "id: tk-050");
+        fs::write(arch.join("tk-050-forged.md"), forged).unwrap();
+        let report = store.integrity_report().unwrap().join("\n");
+        assert!(
+            report.contains("tk-002") && report.contains("unblock"),
+            "{}",
+            report
+        );
+        assert!(report.contains("tk-050"), "{}", report);
         let _ = fs::remove_dir_all(&tmp);
     }
 }

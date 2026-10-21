@@ -1383,7 +1383,17 @@ pub fn run() -> Result<()> {
             let approval = cli_approval(&store, &cards)?;
             let mut failed = 0;
             for card in &cards {
-                match store.complete_task_with(&card.meta.id, &actor, note.as_deref(), approval) {
+                // Bind each approval to the receipt shown in the summary.
+                let shown = (card.meta.status == TaskStatus::PendingClose)
+                    .then_some(card.meta.receipt.as_ref())
+                    .flatten();
+                match store.complete_task_confirmed(
+                    &card.meta.id,
+                    &actor,
+                    note.as_deref(),
+                    approval,
+                    shown,
+                ) {
                     Ok(c) => println!(
                         "{}",
                         done_message(&c.meta.status, &c.meta.id, &c.meta.title)
@@ -2676,9 +2686,13 @@ fn render_dependency_tree(
 /// With `--pending`, a global card whose id also exists locally is skipped, because `find_task`
 /// would resolve that id to the local card.
 fn done_targets(store: &TaskStore, ids: &[String], pending: bool) -> Result<Vec<TaskCard>> {
-    let mut cards = Vec::new();
+    let mut cards: Vec<TaskCard> = Vec::new();
     for id in ids {
-        cards.push(store.find_task(id)?);
+        let card = store.find_task(id)?;
+        // `1`, `tk-1` and `tk-001` are the same task: process it once.
+        if !cards.iter().any(|c| c.path == card.path) {
+            cards.push(card);
+        }
     }
     if pending {
         let local = store.list_store_cards()?;
@@ -2689,11 +2703,16 @@ fn done_targets(store: &TaskStore, ids: &[String], pending: bool) -> Result<Vec<
             ScopeSelection::Auto | ScopeSelection::All
         ) && let Some(peer) = store.peer.as_ref()
         {
-            candidates.extend(
-                peer.list_store_cards()?
-                    .into_iter()
-                    .filter(|c| !local_ids.contains(&c.meta.id.to_lowercase())),
-            );
+            for c in peer.list_store_cards()? {
+                if !local_ids.contains(&c.meta.id.to_lowercase()) {
+                    candidates.push(c);
+                } else if c.meta.status == TaskStatus::PendingClose {
+                    eprintln!(
+                        "warning: skipped global {} ({}): a local task has the same id. Close it with `tk d -G {}`",
+                        c.meta.id, c.meta.title, c.meta.id
+                    );
+                }
+            }
         }
         for c in candidates {
             if c.meta.status == TaskStatus::PendingClose && !cards.iter().any(|x| x.path == c.path)
@@ -2912,6 +2931,41 @@ mod tests {
             Some(Commands::Resume { id, .. }) => assert_eq!(id, "1"),
             other => panic!("Expected Resume, got {:?}", other),
         }
+    }
+
+    /// RED (Sourcery #22): the same task given twice (or by two aliases) was processed twice.
+    #[test]
+    fn test_done_targets_dedupes_ids() {
+        let tmp = std::env::temp_dir().join(format!("tkmd-lib-dedupe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("tasks")).unwrap();
+        let store = TaskStore {
+            tasks_path: tmp.join("tasks"),
+            daily_path: tmp.clone(),
+            config: store::AppConfig {
+                mode: "cli".into(),
+                vault_path: tmp.to_string_lossy().to_string(),
+                tasks_dir: "tasks".into(),
+                base_file: String::new(),
+                daily_dir: String::new(),
+                default_owner: "ken".into(),
+                obsidian_vault_name: None,
+                editor: None,
+                policy: store::Policy::default(),
+            },
+            scope: CardScope::Local,
+            peer: None,
+            active_scope: ScopeSelection::Local,
+            uninitialized_git_repo: None,
+            is_uninitialized_local: false,
+        };
+        store.add_task("p1 once", None, vec![], None, None).unwrap();
+        let ids: Vec<String> = ["1", "tk-001", "tk-1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(done_targets(&store, &ids, false).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

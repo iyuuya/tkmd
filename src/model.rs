@@ -1,19 +1,27 @@
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
-/// The configured human owner (`default_owner`), set once when a store loads.
-static HUMAN_OWNER: OnceLock<String> = OnceLock::new();
+/// Every configured human owner (`default_owner` of each loaded store).
+static HUMAN_OWNERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-/// Register the configured human owner so session helpers never treat them as an agent CLI.
+/// Register a configured human owner so session helpers never treat them as an agent CLI.
+/// Local and global stores may configure different owners; all of them count.
 pub fn set_human_owner(name: &str) {
-    let _ = HUMAN_OWNER.set(name.trim().trim_start_matches('@').to_lowercase());
+    let n = name.trim().trim_start_matches('@').to_lowercase();
+    if let Ok(mut set) = HUMAN_OWNERS.get_or_init(Default::default).lock() {
+        set.insert(n);
+    }
 }
 
 /// True for the configured owner and the generic human labels.
 pub fn is_human(name: &str) -> bool {
     let n = name.trim().trim_start_matches('@').to_lowercase();
     matches!(n.as_str(), "ken" | "human" | "user" | "")
-        || HUMAN_OWNER.get().is_some_and(|h| *h == n)
+        || HUMAN_OWNERS
+            .get()
+            .and_then(|m| m.lock().ok().map(|set| set.contains(&n)))
+            .unwrap_or(false)
 }
 
 /// Task lifecycle states — maps 1:1 to Obsidian 1.14 Bases Kanban columns.
@@ -275,4 +283,19 @@ pub struct TaskEvent {
     pub to_status: String,
     pub eval_passed: Option<bool>,
     pub title: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RED (Sourcery #23): only the first configured owner was registered as human.
+    #[test]
+    fn test_every_configured_owner_is_human() {
+        set_human_owner("alice-owner");
+        set_human_owner("bob-owner");
+        assert!(is_human("alice-owner"));
+        assert!(is_human("bob-owner"));
+        assert!(!is_human("claude"));
+    }
 }
