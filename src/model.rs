@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
@@ -111,6 +112,12 @@ pub struct TaskFrontmatter {
     /// whether the agent changed its own check while working.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_eval: Option<String>,
+    /// Git blob hash of each repo file the eval command names, pinned with `claimed_eval`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claimed_eval_inputs: BTreeMap<String, String>,
+    /// When the check (eval command + inputs) was pinned: first claim, or `tk auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_pinned_at: Option<String>,
     /// What the agent submitted for review: the exact output snapshot and the check that passed on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ReviewReceipt>,
@@ -118,6 +125,9 @@ pub struct TaskFrontmatter {
     /// current `eval` equals this and passes on submit, the task closes without a manual sign-off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_eval: Option<String>,
+    /// Hashes of the eval's input files when `tk auto` approved it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub approved_eval_inputs: BTreeMap<String, String>,
     /// How the final sign-off was given (`interactive` or `auto:eval`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
@@ -138,6 +148,12 @@ pub struct ReviewReceipt {
     pub snapshot_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval: Option<String>,
+    /// Git blob hash of each repo file the eval names, at submit.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub eval_inputs: BTreeMap<String, String>,
+    /// How the check (eval command or its files) changed since it was pinned at claim, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_changed: Option<String>,
     /// `passed` or `no-eval`
     pub eval_result: String,
     pub submitted_by: String,

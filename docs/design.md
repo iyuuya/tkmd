@@ -127,6 +127,7 @@ AI agents cannot close tasks directly during autonomous execution. `tkmd` enforc
 
 Who is calling does not come from the `--actor` name. Approval is decided by how `tk done` runs:
 - **Untrusted callers** (MCP, scripts, and agents whose shell has no terminal): can submit for review, can never mark `done`.
+- **Pinned check**: the first claim pins the eval command and a git blob hash of each repo file it names. Re-claiming does not reset the pin. If the check changed by sign-off time, `tk d` refuses and says what changed; pass `--accept-changed-eval` to accept it knowingly. Name the check's script in the eval (`sh scripts/check.sh`) so it is pinned.
 - **Interactive sign-off**: `tk d <id>` with stdin and stderr attached to a terminal shows the receipt, any warnings (no eval ran, eval changed after claim), and asks for confirmation.
 - **Auto-accept** (`tk auto <ids>`, terminal only): you approve a task's eval in advance. When the owner submits and that exact eval passes, the task closes as `auto:eval`. Changing the eval revokes the approval. Use it for routine work with a trustworthy check; keep manual sign-off for judgement calls.
 - **Bulk sign-off** (`tk d --pending`): one summary, one confirmation for everything waiting.
@@ -150,7 +151,8 @@ tkmd protects against agents that are sloppy or over-eager but work through `tk`
 | Close its own work through `tk d` or MCP | Yes | — |
 | Edit a card to `status: done` or add `approved_eval` | No | Yes, `tk doctor` |
 | Fake a terminal to answer the sign-off prompt | No | No |
-| Change the script or tests behind an approved `tk auto` eval | No | Partly: the receipt snapshot changes |
+| Change the eval command, or a file it names (e.g. `scripts/check.sh`), after claiming | Yes: sign-off is refused unless the human passes `--accept-changed-eval`; `tk auto` skips the auto-close | — |
+| Change tests the eval runs without naming them (e.g. `cargo test` and `tests/`) | No | Partly: the receipt snapshot covers changes after submit |
 | Edit `.events.jsonl` as well as the card | No | No |
 | Pass another agent's name to `--owner`/`--actor`, or `force` through MCP | No | The event log records it |
 | Change a gitignored file the eval depends on | No | No: the snapshot covers tracked and untracked, not ignored, files |

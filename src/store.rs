@@ -1086,6 +1086,9 @@ views:
             receipt: None,
             approval: None,
             approved_eval: None,
+            claimed_eval_inputs: Default::default(),
+            check_pinned_at: None,
+            approved_eval_inputs: Default::default(),
             created: today.clone(),
             updated: today,
             _organized: true,
@@ -1154,6 +1157,60 @@ views:
             }
         }
         None
+    }
+
+    /// Git blob hashes of the repo files an eval command names (`sh scripts/check.sh` pins
+    /// `scripts/check.sh`). Only regular files inside the eval's working directory count, so
+    /// `cargo test` pins nothing and `/bin/sh` is never pinned. Empty without git.
+    pub fn eval_inputs(&self, eval: Option<&str>) -> std::collections::BTreeMap<String, String> {
+        let mut out = std::collections::BTreeMap::new();
+        let Some(eval) = eval.filter(|e| !e.trim().is_empty()) else {
+            return out;
+        };
+        let root = Path::new(&self.config.vault_path);
+        let Ok(root_canon) = root.canonicalize() else {
+            return out;
+        };
+        let tokens = eval
+            .split(|c: char| c.is_whitespace() || ";&|()<>'\"`=".contains(c))
+            .filter(|t| !t.is_empty() && !t.starts_with('-'));
+        for token in tokens {
+            if out.len() >= MAX_EVAL_INPUTS {
+                break;
+            }
+            let Ok(canon) = root.join(token).canonicalize() else {
+                continue;
+            };
+            if !canon.is_file() || !canon.starts_with(&root_canon) {
+                continue;
+            }
+            let rel = canon
+                .strip_prefix(&root_canon)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_else(|_| token.to_string());
+            if let Some(hash) =
+                git_output(root, &["hash-object", "--", &canon.to_string_lossy()], None)
+            {
+                // The blob hash covers contents only; the executable bit decides whether
+                // `./check.sh` runs at all, so it is part of the pin.
+                out.insert(
+                    rel,
+                    format!("{}{}", hash, if is_executable(&canon) { ":x" } else { "" }),
+                );
+            }
+        }
+        out
+    }
+
+    /// How the task's check changed since it was pinned at claim (or `tk auto`), if it did.
+    pub fn check_change(&self, card: &TaskCard) -> Option<String> {
+        card.meta.check_pinned_at.as_ref()?;
+        describe_check_change(
+            card.meta.claimed_eval.as_deref(),
+            &card.meta.claimed_eval_inputs,
+            card.meta.eval.as_deref(),
+            &self.eval_inputs(card.meta.eval.as_deref()),
+        )
     }
 
     /// An archived card (`tasks/archive/<id>-*.md`) here or in the peer store.
@@ -1328,7 +1385,15 @@ views:
         card.meta.owner = new_owner;
         // A new claim starts a new attempt: any earlier review receipt no longer applies.
         card.meta.receipt = None;
-        card.meta.claimed_eval = card.meta.eval.clone();
+        // Pin the check on a fresh claim only. Re-claiming work already in progress or under
+        // review keeps the original pin, so "edit the script, re-claim" cannot launder a change.
+        if !matches!(prev.as_str(), "in-progress" | "pending-close")
+            || card.meta.check_pinned_at.is_none()
+        {
+            card.meta.claimed_eval = card.meta.eval.clone();
+            card.meta.claimed_eval_inputs = self.eval_inputs(card.meta.eval.as_deref());
+            card.meta.check_pinned_at = Some(Local::now().to_rfc3339());
+        }
         let resolved_sid = session_id
             .filter(|s| !s.trim().is_empty())
             .or_else(Self::detect_env_session_id);
@@ -1599,15 +1664,37 @@ views:
                 card.meta.id, note
             );
         }
+        let eval_inputs = self.eval_inputs(card.meta.eval.as_deref());
+        let check_changed = card.meta.check_pinned_at.as_ref().and_then(|_| {
+            describe_check_change(
+                card.meta.claimed_eval.as_deref(),
+                &card.meta.claimed_eval_inputs,
+                card.meta.eval.as_deref(),
+                &eval_inputs,
+            )
+        });
+        let approved_inputs_changed =
+            card.meta.approved_eval.is_some() && card.meta.approved_eval_inputs != eval_inputs;
         card.meta.receipt = Some(ReviewReceipt {
             snapshot,
             snapshot_note,
             eval: card.meta.eval.clone(),
+            eval_inputs,
+            check_changed,
             eval_result: if has_eval(&card) { "passed" } else { "no-eval" }.to_string(),
             submitted_by: actor.to_string(),
             submitted_at: Local::now().to_rfc3339(),
         });
-        let auto_accept = has_eval(&card) && card.meta.approved_eval == card.meta.eval;
+        let approved_matches =
+            card.meta.approved_eval.is_some() && card.meta.approved_eval == card.meta.eval;
+        let auto_accept = has_eval(&card) && approved_matches && !approved_inputs_changed;
+        if approved_matches && approved_inputs_changed {
+            card.body = format!(
+                "{}\n- `{}`: Auto-accept skipped: a file the approved eval runs changed since `tk auto`. Waiting for manual sign-off.",
+                card.body.trim_end(),
+                Local::now().format("%Y-%m-%d %H:%M")
+            );
+        }
         card.meta.status = TaskStatus::PendingClose;
         card.meta.updated = Local::now().format("%Y-%m-%d").to_string();
         let suffix = match note {
@@ -1701,6 +1788,12 @@ views:
             );
         };
         card.meta.approved_eval = Some(eval.clone());
+        // Approving the check is also the human blessing it as the task's contract.
+        let inputs = self.eval_inputs(Some(&eval));
+        card.meta.approved_eval_inputs = inputs.clone();
+        card.meta.claimed_eval = Some(eval.clone());
+        card.meta.claimed_eval_inputs = inputs;
+        card.meta.check_pinned_at = Some(Local::now().to_rfc3339());
         card.meta.updated = Local::now().format("%Y-%m-%d").to_string();
         card.body = format!(
             "{}\n- `{}`: Auto-accept on: closes when eval `{}` passes (approved by `{}`).",
@@ -1768,7 +1861,7 @@ views:
         note: Option<&str>,
         approval: Approval,
     ) -> Result<TaskCard> {
-        self.complete_task_confirmed(query, actor, note, approval, None)
+        self.complete_task_confirmed(query, actor, note, approval, None, false)
     }
 
     /// Like `complete_task_with`, but refuses if the card's review receipt is no longer the one
@@ -1781,10 +1874,18 @@ views:
         note: Option<&str>,
         approval: Approval,
         expected: Option<&ReviewReceipt>,
+        accept_changed_eval: bool,
     ) -> Result<TaskCard> {
         let found = self.find_task(query)?;
         if let Some(peer) = self.owning_peer(&found) {
-            return peer.complete_task_confirmed(&found.meta.id, actor, note, approval, expected);
+            return peer.complete_task_confirmed(
+                &found.meta.id,
+                actor,
+                note,
+                approval,
+                expected,
+                accept_changed_eval,
+            );
         }
         let owner = self.config.default_owner.clone();
 
@@ -1851,6 +1952,30 @@ views:
                         card.meta.id
                     );
                 }
+                let now_inputs = self.eval_inputs(card.meta.eval.as_deref());
+                if let Some(change) = describe_check_change(
+                    receipt.eval.as_deref(),
+                    &receipt.eval_inputs,
+                    card.meta.eval.as_deref(),
+                    &now_inputs,
+                ) {
+                    bail!(
+                        "Cannot approve {}: the check changed after it was submitted ({}). Re-submit with `tk review {}`",
+                        card.meta.id,
+                        change,
+                        card.meta.id
+                    );
+                }
+                if let Some(change) = &receipt.check_changed
+                    && !accept_changed_eval
+                {
+                    bail!(
+                        "Cannot approve {}: its check changed since it was claimed ({}). If you accept the new check, run `tk d {} --accept-changed-eval`",
+                        card.meta.id,
+                        change,
+                        card.meta.id
+                    );
+                }
                 if receipt.snapshot.is_some() && self.worktree_snapshot() != receipt.snapshot {
                     bail!(
                         "Cannot approve {}: the output changed since the eval passed (receipt {}). Re-submit with `tk review {}`",
@@ -1867,9 +1992,28 @@ views:
                         card.meta.id
                     );
                 }
+                if card.meta.check_pinned_at.is_some()
+                    && !accept_changed_eval
+                    && let Some(change) = describe_check_change(
+                        card.meta.claimed_eval.as_deref(),
+                        &card.meta.claimed_eval_inputs,
+                        card.meta.eval.as_deref(),
+                        &self.eval_inputs(card.meta.eval.as_deref()),
+                    )
+                {
+                    bail!(
+                        "Cannot close {}: its check changed since it was claimed ({}). If you accept the new check, run `tk d {} --accept-changed-eval`",
+                        card.meta.id,
+                        change,
+                        card.meta.id
+                    );
+                }
             }
         }
 
+        // Captured before the eval runs: a direct close has no receipt to carry it.
+        let changed_since_claim =
+            card.meta.status != TaskStatus::PendingClose && self.check_change(&card).is_some();
         let (passed, eval_out) = self.eval_card(&mut card, &owner)?;
         if !passed {
             self.write_card(&card)?;
@@ -1882,7 +2026,17 @@ views:
 
         let today = Local::now().format("%Y-%m-%d").to_string();
         let now_ts = Local::now().format("%Y-%m-%d %H:%M").to_string();
-        let approval_label = "interactive".to_string();
+        let check_was_changed = card
+            .meta
+            .receipt
+            .as_ref()
+            .is_some_and(|r| r.check_changed.is_some())
+            || changed_since_claim;
+        let approval_label = if accept_changed_eval && check_was_changed {
+            "interactive (accepted changed check)".to_string()
+        } else {
+            "interactive".to_string()
+        };
 
         card.meta.status = TaskStatus::Done;
         card.meta.updated = today.clone();
@@ -2746,6 +2900,50 @@ fn has_eval(card: &TaskCard) -> bool {
         .eval
         .as_deref()
         .is_some_and(|e| !e.trim().is_empty())
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    false
+}
+
+/// Most files an eval command may pin (anything beyond is ignored).
+const MAX_EVAL_INPUTS: usize = 32;
+
+/// How the check moved from `(old_eval, old_inputs)` to `(new_eval, new_inputs)`, or `None`.
+fn describe_check_change(
+    old_eval: Option<&str>,
+    old_inputs: &std::collections::BTreeMap<String, String>,
+    new_eval: Option<&str>,
+    new_inputs: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if old_eval.map(str::trim) != new_eval.map(str::trim) {
+        parts.push(format!(
+            "eval `{}` -> `{}`",
+            old_eval.unwrap_or("none"),
+            new_eval.unwrap_or("none")
+        ));
+    }
+    for (path, hash) in old_inputs {
+        match new_inputs.get(path) {
+            Some(h) if h == hash => {}
+            Some(_) => parts.push(format!("{} changed", path)),
+            None => parts.push(format!("{} removed", path)),
+        }
+    }
+    for path in new_inputs.keys() {
+        if !old_inputs.contains_key(path) {
+            parts.push(format!("{} added", path));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// `7`, `tk-7`, `TK-007` -> `tk-007`; `None` for anything that is not an id.
@@ -4097,7 +4295,7 @@ mod tests {
             .submit_for_review("1", "claude", Some("again"), None)
             .unwrap();
         let err = store
-            .complete_task_confirmed("1", "ken", None, Approval::Interactive, Some(&shown))
+            .complete_task_confirmed("1", "ken", None, Approval::Interactive, Some(&shown), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("changed"), "{}", err);
@@ -4294,6 +4492,242 @@ mod tests {
             report
         );
         assert!(report.contains("tk-050"), "{}", report);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ---- Eval contract pinning (dev.to review by prpatel05) ----
+
+    fn write_check(store: &TaskStore, body: &str) {
+        fs::write(Path::new(&store.config.vault_path).join("check.sh"), body).unwrap();
+    }
+
+    /// RED: an agent could edit the script its eval runs, after claiming, and get a green close.
+    #[test]
+    fn test_editing_the_eval_script_after_claim_blocks_sign_off() {
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("pin-script");
+        write_check(&store, "exit 1\n");
+        store
+            .add_task("p1 work", None, vec![], Some("sh check.sh".into()), None)
+            .unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        write_check(&store, "exit 0 # made it pass\n");
+        let r = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap()
+            .meta
+            .receipt
+            .unwrap();
+        assert!(
+            r.check_changed
+                .as_deref()
+                .is_some_and(|c| c.contains("check.sh")),
+            "{:?}",
+            r.check_changed
+        );
+        let err = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("changed since") && err.contains("--accept-changed-eval"),
+            "{}",
+            err
+        );
+        let done = store
+            .complete_task_confirmed("1", "ken", None, Approval::Interactive, None, true)
+            .unwrap();
+        assert_eq!(done.meta.status, TaskStatus::Done);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: changing the eval command itself after claim only warned.
+    #[test]
+    fn test_changing_the_eval_command_after_claim_blocks_sign_off() {
+        let (store, tmp) = hardening_store("pin-command");
+        store
+            .add_task("p1 work", None, vec![], Some("exit 0".into()), None)
+            .unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        store
+            .update_task("1", None, None, None, None, vec![], Some("true".into()))
+            .unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        let err = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed since"), "{}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: re-claiming must not reset the pinned check (edit, re-claim, launder).
+    #[test]
+    fn test_reclaiming_does_not_reset_the_pinned_check() {
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("pin-reclaim");
+        write_check(&store, "exit 1\n");
+        store
+            .add_task("p1 work", None, vec![], Some("sh check.sh".into()), None)
+            .unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        write_check(&store, "exit 0\n");
+        store.claim_task("1", "claude", None, false).unwrap();
+        let r = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap()
+            .meta
+            .receipt
+            .unwrap();
+        assert!(
+            r.check_changed.is_some(),
+            "re-claim laundered the script change"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: `tk auto` approved a script name, so editing the script still auto-closed.
+    #[test]
+    fn test_auto_accept_skips_when_the_approved_script_changed() {
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("pin-auto");
+        write_check(&store, "exit 0\n");
+        store
+            .add_task("p1 work", None, vec![], Some("sh check.sh".into()), None)
+            .unwrap();
+        store.approve_eval("1", Approval::Interactive).unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        write_check(&store, "true\n");
+        let c = store.submit_for_review("1", "claude", None, None).unwrap();
+        assert_eq!(
+            c.meta.status,
+            TaskStatus::PendingClose,
+            "changed script must not auto-close"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED: outside git there was no snapshot, so a script edited after submit went unnoticed.
+    #[test]
+    fn test_script_edited_after_submit_is_refused_without_git_snapshot() {
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("pin-after-submit");
+        write_check(&store, "exit 0\n");
+        store
+            .add_task("p1 work", None, vec![], Some("sh check.sh".into()), None)
+            .unwrap();
+        store.submit_for_review("1", "claude", None, None).unwrap();
+        write_check(&store, "exit 0 # changed later\n");
+        let err = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("check.sh"), "{}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_unchanged_check_closes_normally() {
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("pin-unchanged");
+        write_check(&store, "exit 0\n");
+        store
+            .add_task("p1 work", None, vec![], Some("sh check.sh".into()), None)
+            .unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        let r = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap()
+            .meta
+            .receipt
+            .unwrap();
+        assert!(r.check_changed.is_none());
+        assert!(
+            r.eval_inputs.contains_key("check.sh"),
+            "{:?}",
+            r.eval_inputs
+        );
+        let done = store
+            .complete_task_with("1", "ken", None, Approval::Interactive)
+            .unwrap();
+        assert_eq!(done.meta.status, TaskStatus::Done);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery PR #2, #2): `git hash-object` ignores the mode, so making the pinned
+    /// script executable after claim went unnoticed.
+    #[cfg(unix)]
+    #[test]
+    fn test_making_the_script_executable_after_claim_is_a_change() {
+        use std::os::unix::fs::PermissionsExt;
+        if !git_available() {
+            return;
+        }
+        let (store, tmp) = hardening_store("pin-mode");
+        let script = Path::new(&store.config.vault_path).join("check.sh");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        store
+            .add_task("p1 work", None, vec![], Some("./check.sh".into()), None)
+            .unwrap();
+        store.claim_task("1", "claude", None, false).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let r = store
+            .submit_for_review("1", "claude", None, None)
+            .unwrap()
+            .meta
+            .receipt
+            .unwrap();
+        assert!(
+            r.check_changed
+                .as_deref()
+                .is_some_and(|c| c.contains("check.sh")),
+            "{:?}",
+            r.check_changed
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// RED (Sourcery PR #2, #1): closing your own task directly after accepting a changed check
+    /// recorded a plain `interactive` approval, hiding the acceptance.
+    #[test]
+    fn test_direct_close_records_an_accepted_check_change() {
+        let (store, tmp) = hardening_store("pin-direct");
+        store
+            .add_task("p1 mine", None, vec![], Some("exit 0".into()), None)
+            .unwrap();
+        store.claim_task("1", "ken", None, false).unwrap();
+        store
+            .update_task("1", None, None, None, None, vec![], Some("true".into()))
+            .unwrap();
+        let card = store.find_task("1").unwrap();
+        assert!(
+            store
+                .check_change(&card)
+                .is_some_and(|c| c.contains("eval"))
+        );
+        assert!(
+            store
+                .complete_task_with("1", "ken", None, Approval::Interactive)
+                .is_err()
+        );
+        let done = store
+            .complete_task_confirmed("1", "ken", None, Approval::Interactive, None, true)
+            .unwrap();
+        assert_eq!(
+            done.meta.approval.as_deref(),
+            Some("interactive (accepted changed check)")
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }
