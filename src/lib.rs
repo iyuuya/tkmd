@@ -5,6 +5,7 @@ mod ansi;
 mod mcp;
 mod model;
 mod store;
+mod text;
 mod todotxt;
 
 use ansi::Ansi;
@@ -453,23 +454,6 @@ fn terminal_width() -> usize {
     }
 }
 
-/// Truncate a string to `max_chars` visible characters, adding `…` if truncated.
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let count = s.chars().count();
-    if count <= max_chars {
-        s.to_string()
-    } else if max_chars == 1 {
-        "…".to_string()
-    } else {
-        let mut out: String = s.chars().take(max_chars - 1).collect();
-        out.push('…');
-        out
-    }
-}
-
 fn color_priority(pri: &str) -> String {
     match pri {
         "P0" => format!(" {BOLD}{RED}P0{RESET} "),
@@ -484,7 +468,7 @@ fn color_priority_compact(pri: &str) -> String {
         "P0" => format!("{BOLD}{RED}P0{RESET}"),
         "P1" => format!("{BOLD}{ORANGE}P1{RESET}"),
         "P2" => format!("{BOLD}{BLUE}P2{RESET}"),
-        _ => format!("{DIM}{:<2}{RESET}", truncate_str(pri, 2)),
+        _ => format!("{DIM}{:<2}{RESET}", text::truncate(pri, 2)),
     }
 }
 
@@ -514,8 +498,7 @@ fn color_status_compact(st: &TaskStatus) -> String {
 }
 
 fn color_owner(owner: &str, width: usize) -> String {
-    let truncated = truncate_str(owner, width.saturating_sub(1));
-    let padded = format!("@{:<w$}", truncated, w = width.saturating_sub(1));
+    let padded = format!("@{}", text::fit(owner, width.saturating_sub(1)));
     if model::is_human(owner) {
         format!("{BOLD}{GREEN}{}{RESET}", padded)
     } else {
@@ -528,19 +511,19 @@ fn format_title_cell(title: &str, proj: Option<&str>, col_width: usize) -> Strin
     let proj_len = if proj_raw.is_empty() {
         0
     } else {
-        proj_raw.chars().count() + 1
+        text::width(proj_raw) + 1
     };
 
     // Show right-aligned [[project]] badge when at least 22 chars remain for the title itself
     if !proj_raw.is_empty() && col_width >= proj_len + 22 {
         let max_title = col_width - proj_len;
-        let t = truncate_str(title, max_title);
-        let vis = t.chars().count() + proj_len;
+        let t = text::truncate(title, max_title);
+        let vis = text::width(&t) + proj_len;
         let pad = " ".repeat(col_width.saturating_sub(vis));
         format!("{t}{pad} {AQUA}{proj_raw}{RESET}")
     } else {
-        let t = truncate_str(title, col_width);
-        let vis = t.chars().count();
+        let t = text::truncate(title, col_width);
+        let vis = text::width(&t);
         let pad = " ".repeat(col_width.saturating_sub(vis));
         format!("{t}{pad}")
     }
@@ -724,14 +707,12 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
                 let resume_vis_len = c
                     .meta
                     .resume_command()
-                    .map(|cmd| cmd.chars().count() + 5)
+                    .map(|cmd| text::width(&cmd) + 5)
                     .unwrap_or(0);
-                let overhead = 51
-                    + resume_vis_len
-                    + scope_tag_len
-                    + ev_label.chars().count().saturating_sub(6);
+                let overhead =
+                    51 + resume_vis_len + scope_tag_len + text::width(ev_label).saturating_sub(6);
                 let max_t = term_w.saturating_sub(overhead).max(10);
-                let t = truncate_str(&c.meta.title, max_t);
+                let t = text::truncate(&c.meta.title, max_t);
                 println!(
                     "  {BOLD}{:<6}{RESET} {} {} {DIM}[eval: {}]{RESET} {}{}{} {DIM}-> tk d {}{RESET}",
                     c.meta.id,
@@ -753,7 +734,7 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
                 };
                 let overhead = 32 + scope_tag_len;
                 let max_t = term_w.saturating_sub(overhead).max(12);
-                let t = truncate_str(&c.meta.title, max_t);
+                let t = text::truncate(&c.meta.title, max_t);
                 println!(
                     "  {BOLD}{:<6}{RESET} {} {DIM}[{}]{RESET} {}{} {DIM}-> tk d {}{RESET}",
                     c.meta.id,
@@ -765,7 +746,7 @@ fn print_dashboard_table(store: &TaskStore, cards: &[TaskCard]) {
                 );
                 if let Some(cmd) = c.meta.resume_command() {
                     let max_cmd_w = term_w.saturating_sub(18).max(15);
-                    let truncated_cmd = truncate_str(&cmd, max_cmd_w);
+                    let truncated_cmd = text::truncate(&cmd, max_cmd_w);
                     println!("         {DIM}↳ session:{RESET} {AQUA}{truncated_cmd}{RESET}");
                 }
             }
@@ -1126,7 +1107,7 @@ pub fn run() -> Result<()> {
                 "{GREEN}✓ Created{RESET} {BOLD}{}{RESET} [{}] ({}) -> {BOLD}{}{RESET}",
                 card.meta.id,
                 color_priority(&card.meta.priority).trim(),
-                color_owner(&card.meta.owner, card.meta.owner.chars().count() + 1),
+                color_owner(&card.meta.owner, text::width(&card.meta.owner) + 1),
                 card.meta.title
             );
         }
@@ -1873,15 +1854,15 @@ pub fn run() -> Result<()> {
                                 format!("{DIM}{:<21}{RESET}", cond_text)
                             };
 
-                            let owner_fmt = format!("@{}", t.owner);
-                            let title_fmt = truncate_str(&t.title, title_w);
+                            let owner_fmt = text::pad(&format!("@{}", t.owner), 10);
+                            let title_fmt = text::truncate(&t.title, title_w);
                             let es_str = crate::analytics::format_duration_concise(t.early_start);
                             let ef_str = crate::analytics::format_duration_concise(t.early_finish);
                             let ls_str = crate::analytics::format_duration_concise(t.late_start);
                             let lf_str = crate::analytics::format_duration_concise(t.late_finish);
 
                             println!(
-                                "  {:<8} {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>6}  {} {:<10} {:<10} {}",
+                                "  {:<8} {:>5}  {:>5}  {:>5}  {:>5}  {:>5}  {:>6}  {} {} {:<10} {}",
                                 t.id,
                                 t.duration_display,
                                 es_str,
@@ -1937,13 +1918,13 @@ pub fn run() -> Result<()> {
                                 format!("{DIM}{:<10}{RESET}", cond_text)
                             };
 
-                            let owner_fmt = format!("@{}", truncate_str(&t.owner, 7));
-                            let title_fmt = truncate_str(&t.title, title_w);
+                            let owner_fmt = format!("@{}", text::fit(&t.owner, 7));
+                            let title_fmt = text::truncate(&t.title, title_w);
                             let es_str = crate::analytics::format_duration_concise(t.early_start);
                             let ef_str = crate::analytics::format_duration_concise(t.early_finish);
 
                             println!(
-                                "  {:<7} {:<5} {:<5} {:<5} {:<6} {} {:<8} {}",
+                                "  {:<7} {:<5} {:<5} {:<5} {:<6} {} {} {}",
                                 t.id,
                                 t.duration_display,
                                 es_str,
@@ -1989,7 +1970,7 @@ pub fn run() -> Result<()> {
                             } else {
                                 format!("{DIM}+{:<4}{RESET}", t.buffer_display)
                             };
-                            let title_fmt = truncate_str(&t.title, title_w);
+                            let title_fmt = text::truncate(&t.title, title_w);
                             let es_str = crate::analytics::format_duration_concise(t.early_start);
                             let ef_str = crate::analytics::format_duration_concise(t.early_finish);
 
@@ -2081,7 +2062,7 @@ pub fn run() -> Result<()> {
                                 print!("   ");
                             }
                         }
-                        let truncated_title = truncate_str(&row_card.meta.title, dsm_title_w);
+                        let truncated_title = text::truncate(&row_card.meta.title, dsm_title_w);
                         println!("  {} ({})", truncated_title, row_card.meta.status.as_str());
                     }
                     println!("  {dsm_div}");
@@ -3041,6 +3022,26 @@ mod tests {
         let cell = format_title_cell("Fix login screen", Some("[[auth]]"), 40);
         assert!(cell.contains("Fix login screen"));
         assert!(cell.contains("[[auth]]"));
+    }
+
+    #[test]
+    fn test_format_title_cell_fills_column_with_wide_chars() {
+        for (title, proj) in [
+            ("日本語のタイトル", Some("[[proj]]")),
+            ("日本語のタイトル", None),
+            (
+                "とても長い日本語のタイトルが列幅を超える場合",
+                Some("[[proj]]"),
+            ),
+            ("とても長い日本語のタイトルが列幅を超える場合", None),
+        ] {
+            let cell = text::strip_ansi(&format_title_cell(title, proj, 40));
+            assert_eq!(
+                text::width(&cell),
+                40,
+                "{title:?} with {proj:?} should fill the 40-cell column exactly"
+            );
+        }
     }
 
     #[test]
