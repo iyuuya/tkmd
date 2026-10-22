@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- When no task has a `needs:` dependency and every task ends up with zero buffer (for example, tasks without `est:` all default to 1d), no task is marked critical: `critical_path` is empty in `tk dep --cpm`, the timeline and the MCP `task_cpm` result. With differing durations the longest task stays critical.
+- `Critical Path:` only joins tasks with `➔` when one waits on the other; tasks that start together in a chain are joined by ` / ` and independent chains are separated by `, ` (`tk dep --cpm`/`--timeline`/`--network`/`--gantt` and the CPM summaries). The `critical_path` array is unchanged.
+- `tk dep --timeline` colors bars by status, as `tk ls` does; critical tasks are marked by their red duration instead of a red bar, so a done task on the critical path shows green. The legend lists Blocked and the critical marker.
+
 ### Fixed
+- The `tk dep --timeline` dividers line up with the rows: `┼`/`┴` sit under `│`, the midpoint tick under the bar's middle and `┤`/`┘` just past the bar (they were one cell to the left).
 - Tables no longer break when titles or owners contain CJK or other wide characters: column widths are measured in terminal cells instead of characters (`tk ls`, `tk review`, `tk dep --cpm`/`--dsm`/`--timeline`/`--network`, `tk history`, `tk stats`, `tk find`).
 - The `tk dep --timeline` row label no longer panics on a non-ASCII owner name.
 

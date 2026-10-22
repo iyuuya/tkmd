@@ -846,6 +846,15 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
         });
     }
 
+    // With no `needs:` edges and one shared duration every task has zero buffer,
+    // so marking all of them critical says nothing about what to do first.
+    let has_dependencies = preds.values().any(|p| !p.is_empty());
+    if !has_dependencies && schedule.iter().all(|t| t.is_critical) {
+        for t in &mut schedule {
+            t.is_critical = false;
+        }
+    }
+
     let critical_path: Vec<String> = schedule
         .iter()
         .filter(|t| t.is_critical)
@@ -857,8 +866,7 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
 
     let summary_short =
         generate_cpm_summary_short(&project_duration_display, &critical_path, &schedule);
-    let summary_long =
-        generate_cpm_summary_long(&project_duration_display, &critical_path, &schedule);
+    let summary_long = generate_cpm_summary_long(&project_duration_display, &schedule);
 
     CpmAnalysis {
         project_duration_seconds: total_project_duration_secs,
@@ -869,6 +877,66 @@ pub fn compute_cpm(all_cards: &[TaskCard]) -> CpmAnalysis {
         summary_long,
         schedule,
     }
+}
+
+/// Render the critical tasks for display. `➔` only joins a task to a critical
+/// prerequisite it waits on, critical tasks that start together within one chain
+/// are joined by ` / `, and independent chains are separated by `, `.
+pub fn format_critical_path(schedule: &[CpmTaskSchedule]) -> String {
+    let crit: Vec<&CpmTaskSchedule> = schedule.iter().filter(|t| t.is_critical).collect();
+    let index: HashMap<&str, usize> = crit
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.id.as_str(), i))
+        .collect();
+
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    let mut parent: Vec<usize> = (0..crit.len()).collect();
+    for (i, t) in crit.iter().enumerate() {
+        for b in &t.blocked_by {
+            if let Some(&j) = index.get(b.as_str())
+                && crit[j].early_finish == t.early_start
+            {
+                let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
+                parent[ri] = rj;
+            }
+        }
+    }
+
+    let mut chains: HashMap<usize, Vec<&CpmTaskSchedule>> = HashMap::new();
+    for (i, t) in crit.iter().enumerate() {
+        chains.entry(root(&mut parent, i)).or_default().push(t);
+    }
+    let mut chains: Vec<Vec<&CpmTaskSchedule>> = chains.into_values().collect();
+    for chain in &mut chains {
+        chain.sort_by(|a, b| (a.early_start, &a.id).cmp(&(b.early_start, &b.id)));
+    }
+    chains.sort_by(|a, b| (a[0].early_start, &a[0].id).cmp(&(b[0].early_start, &b[0].id)));
+
+    chains
+        .iter()
+        .map(|chain| {
+            chain
+                .chunk_by(|a, b| a.early_start == b.early_start)
+                .map(|stage| {
+                    stage
+                        .iter()
+                        .map(|t| t.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                })
+                .collect::<Vec<_>>()
+                .join(" ➔ ")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn generate_cpm_summary_short(
@@ -886,7 +954,7 @@ pub fn generate_cpm_summary_short(
     let path_str = if critical_path.is_empty() {
         "None".to_string()
     } else {
-        critical_path.join(" ➔ ")
+        format_critical_path(schedule)
     };
 
     let mut summary = format!(
@@ -911,11 +979,7 @@ pub fn generate_cpm_summary_short(
     summary
 }
 
-pub fn generate_cpm_summary_long(
-    duration: &str,
-    critical_path: &[String],
-    schedule: &[CpmTaskSchedule],
-) -> String {
+pub fn generate_cpm_summary_long(duration: &str, schedule: &[CpmTaskSchedule]) -> String {
     if schedule.is_empty() {
         return "No tasks recorded. The project schedule is empty.".to_string();
     }
@@ -970,7 +1034,7 @@ pub fn generate_cpm_summary_long(
         }
         s.push_str(&format!(
             "\nSequence: {BOLD}{RED}{}{RESET}\n\n",
-            critical_path.join(" ➔ ")
+            format_critical_path(schedule)
         ));
     }
 
@@ -1182,6 +1246,31 @@ fn gantt_row_label(t: &CpmTaskSchedule, label_w: usize) -> String {
     }
 }
 
+/// Horizontal rule of the Gantt chart. `joint` sits under the rows' `│`, `tick`
+/// under the middle of the bar area and `corner` just past its right edge.
+fn gantt_rule(label_w: usize, bar_w: usize, joint: char, tick: char, corner: char) -> String {
+    // Rows print `{label} │ {bar}`: one cell before `│` and one after it.
+    let mut bar: Vec<char> = vec!['─'; bar_w + 1];
+    bar[1 + bar_w / 2] = tick;
+    format!(
+        "{}{joint}{}{corner}",
+        "─".repeat(label_w + 1),
+        bar.into_iter().collect::<String>()
+    )
+}
+
+/// Bar color follows the task status, matching `tk ls`; critical tasks are
+/// marked by their red duration instead so a done task never reads as urgent.
+fn gantt_bar_color(status: &str) -> String {
+    match status {
+        "done" | "archived" => GREEN.to_string(),
+        "pending-close" => format!("{BOLD}{PURPLE}"),
+        "in-progress" => format!("{BOLD}{ORANGE}"),
+        "blocked" => RED.to_string(),
+        _ => AQUA.to_string(),
+    }
+}
+
 pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
     if analysis.schedule.is_empty() {
         println!("\n{BOLD_WHITE}🎯 TIMELINE & EXECUTION SCHEDULE (TERMINAL GANTT){RESET}");
@@ -1254,14 +1343,10 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
 
     println!("  {} │ {DIM}{}{RESET}", hdr_label, ruler_str);
 
-    // Divider line
-    let div_left = "─".repeat(label_w);
-    let mut div_bar_chars = vec!['─'; bar_w];
-    if mid_pos < bar_w {
-        div_bar_chars[mid_pos] = '┬';
-    }
-    let div_bar: String = div_bar_chars.into_iter().collect();
-    println!("  {DIM}{}┼{}┤{RESET}", div_left, div_bar);
+    println!(
+        "  {DIM}{}{RESET}",
+        gantt_rule(label_w, bar_w, '┼', '┬', '┤')
+    );
 
     for t in &analysis.schedule {
         let start_ratio = (t.early_start as f64 / total_secs).clamp(0.0, 1.0);
@@ -1277,21 +1362,8 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
             .max(finish_col)
             .min(bar_w);
 
-        let (bar_color, is_crit) = if t.is_critical {
-            if t.status == "pending-close" {
-                (format!("{BOLD}{PURPLE}"), true)
-            } else {
-                (format!("{BOLD}{RED}"), true)
-            }
-        } else {
-            match t.status.as_str() {
-                "done" | "archived" => (GREEN.to_string(), false),
-                "pending-close" => (PURPLE.to_string(), false),
-                "in-progress" => (format!("{BOLD}{ORANGE}"), false),
-                "blocked" => (RED.to_string(), false),
-                _ => (AQUA.to_string(), false),
-            }
-        };
+        let bar_color = gantt_bar_color(&t.status);
+        let is_crit = t.is_critical;
 
         let mut bar_render = String::new();
         for col in 0..bar_w {
@@ -1335,12 +1407,10 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
         );
     }
 
-    let mut div_bottom_chars = vec!['─'; bar_w];
-    if mid_pos < bar_w {
-        div_bottom_chars[mid_pos] = '┴';
-    }
-    let div_bottom: String = div_bottom_chars.into_iter().collect();
-    println!("  {DIM}{}┴{}┘{RESET}", div_left, div_bottom);
+    println!(
+        "  {DIM}{}{RESET}",
+        gantt_rule(label_w, bar_w, '┴', '┴', '┘')
+    );
 
     println!(
         "\n  {BOLD}Project Duration:{RESET} {}",
@@ -1349,11 +1419,11 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
     if !analysis.critical_path.is_empty() {
         println!(
             "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
-            analysis.critical_path.join(" ➔ ")
+            format_critical_path(&analysis.schedule)
         );
     }
     println!(
-        "  {DIM}Legend: {BOLD}{RED}█{RESET} {DIM}Critical {BOLD}{PURPLE}█{RESET} {DIM}Review {BOLD}{ORANGE}█{RESET} {DIM}Active {AQUA}█{RESET} {DIM}Ready {GREEN}█{RESET} {DIM}Done {DIM}░ Buffer{RESET}\n"
+        "  {DIM}Legend: {AQUA}█{RESET} {DIM}Ready {BOLD}{ORANGE}█{RESET} {DIM}Active {BOLD}{PURPLE}█{RESET} {DIM}Review {RED}█{RESET} {DIM}Blocked {GREEN}█{RESET} {DIM}Done {DIM}░ Buffer · {RESET}{BOLD}{RED}1d{RESET} {DIM}Critical duration{RESET}\n"
     );
 }
 
@@ -1583,7 +1653,7 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
     if !analysis.critical_path.is_empty() {
         println!(
             "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
-            analysis.critical_path.join(" ➔ ")
+            format_critical_path(&analysis.schedule)
         );
     }
     println!();
@@ -1877,5 +1947,87 @@ mod tests {
             render_terminal_gantt(&analysis, term_w);
             render_terminal_aon(&analysis, term_w, None);
         }
+    }
+
+    #[test]
+    fn test_compute_cpm_without_dependencies_marks_nothing_critical() {
+        let cards = vec![
+            make_test_card("tk-001", "A", "2026-10-01", None, vec![]),
+            make_test_card("tk-002", "B", "2026-10-01", None, vec![]),
+            make_test_card("tk-003", "C", "2026-10-01", None, vec![]),
+        ];
+        let analysis = compute_cpm(&cards);
+        assert!(analysis.critical_path.is_empty());
+        assert!(analysis.schedule.iter().all(|t| !t.is_critical));
+        assert_eq!(format_critical_path(&analysis.schedule), "");
+    }
+
+    #[test]
+    fn test_compute_cpm_without_dependencies_keeps_longest_task_critical() {
+        let cards = vec![
+            make_timed_card("tk-001", "Short", "1h", vec![]),
+            make_timed_card("tk-002", "Long", "3h", vec![]),
+        ];
+        let analysis = compute_cpm(&cards);
+        assert_eq!(analysis.critical_path, vec!["tk-002"]);
+    }
+
+    #[test]
+    fn test_format_critical_path_only_links_dependent_tasks() {
+        // tk-001 -> tk-002 (2h chain) runs alongside the independent 2h tk-003.
+        let cards = vec![
+            make_timed_card("tk-001", "First", "1h", vec![]),
+            make_timed_card("tk-002", "Second", "1h", vec!["tk-001"]),
+            make_timed_card("tk-003", "Alone", "2h", vec![]),
+        ];
+        let analysis = compute_cpm(&cards);
+        assert_eq!(
+            analysis.schedule.iter().filter(|t| t.is_critical).count(),
+            3
+        );
+        assert_eq!(
+            format_critical_path(&analysis.schedule),
+            "tk-001 ➔ tk-002, tk-003"
+        );
+    }
+
+    #[test]
+    fn test_format_critical_path_groups_parallel_critical_tasks() {
+        let cards = vec![
+            make_timed_card("tk-001", "Root", "1h", vec![]),
+            make_timed_card("tk-002", "Left", "1h", vec!["tk-001"]),
+            make_timed_card("tk-003", "Right", "1h", vec!["tk-001"]),
+        ];
+        let analysis = compute_cpm(&cards);
+        assert_eq!(
+            format_critical_path(&analysis.schedule),
+            "tk-001 ➔ tk-002 / tk-003"
+        );
+    }
+
+    #[test]
+    fn test_gantt_rule_lines_up_with_rows() {
+        let analysis = wide_char_analysis();
+        for label_w in [22, 18, 12] {
+            let label = text::strip_ansi(&gantt_row_label(&analysis.schedule[0], label_w));
+            for bar_w in [15, 30, 65] {
+                let row = format!("{label} │ {}", "█".repeat(bar_w));
+                // Every rule glyph is one cell wide, so its char index is its column.
+                let rule: Vec<char> = gantt_rule(label_w, bar_w, '┼', '┬', '┤').chars().collect();
+
+                let sep = text::width(row.split('│').next().unwrap());
+                assert_eq!(rule[sep], '┼', "joint under │ (label_w={label_w})");
+                assert_eq!(rule[sep + 2 + bar_w / 2], '┬', "tick at the bar midpoint");
+                assert_eq!(rule.len(), text::width(&row) + 1);
+                assert_eq!(rule[rule.len() - 1], '┤', "corner just past the bar");
+            }
+        }
+    }
+
+    #[test]
+    fn test_gantt_bar_color_follows_status_not_criticality() {
+        assert!(gantt_bar_color("done").contains(GREEN.0));
+        assert!(gantt_bar_color("ready").contains(AQUA.0));
+        assert!(!gantt_bar_color("ready").contains(RED.0));
     }
 }
