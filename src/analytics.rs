@@ -1,6 +1,7 @@
 use crate::ansi::Ansi;
 use crate::model::{TaskCard, TaskStatus};
 use crate::store::TaskStore;
+use crate::text;
 use anyhow::Result;
 use chrono::{DateTime, FixedOffset, Local};
 use serde::{Deserialize, Serialize};
@@ -131,22 +132,6 @@ pub fn format_duration_concise(secs: u64) -> String {
     }
 }
 
-fn truncate_vis(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let count = s.chars().count();
-    if count <= max_chars {
-        s.to_string()
-    } else if max_chars == 1 {
-        "…".to_string()
-    } else {
-        let mut out: String = s.chars().take(max_chars - 1).collect();
-        out.push('…');
-        out
-    }
-}
-
 /// Render `tk history [id]` (alias `tk h`) — chronological event timeline with step deltas.
 pub fn print_history(
     store: &TaskStore,
@@ -222,7 +207,7 @@ pub fn print_history(
     for (ev, parsed_ts, delta) in slice {
         let time_short = parsed_ts
             .map(|t| t.format("%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| truncate_vis(&ev.timestamp, 11));
+            .unwrap_or_else(|| text::truncate(&ev.timestamp, 11));
 
         let action_colored = match ev.action.as_str() {
             "created" => format!("{AQUA}+ created    {RESET}"),
@@ -236,18 +221,18 @@ pub fn print_history(
             }
             "pending-close" => format!("{BOLD}{PURPLE}◐ review     {RESET}"),
             "completed" => format!("{BOLD}{GREEN}✓ completed  {RESET}"),
-            other => format!("{:<13}", truncate_vis(other, 13)),
+            other => text::fit(other, 13),
         };
 
-        let actor_str = format!("@{:<7}", truncate_vis(&ev.actor, 7));
+        let actor_str = format!("@{}", text::fit(&ev.actor, 7));
         let actor_colored = if ev.actor.eq_ignore_ascii_case("ken") {
             format!("{BOLD}{GREEN}{actor_str}{RESET}")
         } else {
             format!("{PURPLE}{actor_str}{RESET}")
         };
 
-        let t = truncate_vis(&ev.title, title_w);
-        let pad = " ".repeat(title_w.saturating_sub(t.chars().count()));
+        let t = text::truncate(&ev.title, title_w);
+        let pad = " ".repeat(title_w.saturating_sub(text::width(&t)));
 
         println!(
             "{DIM}│{RESET} {DIM}{:<11}{RESET} {DIM}│{RESET} {BOLD}{:<6}{RESET} {DIM}│{RESET} {} {DIM}│{RESET} {} {DIM}│{RESET} {:<8} {DIM}│{RESET} {}{} {DIM}│{RESET}",
@@ -255,7 +240,7 @@ pub fn print_history(
             ev.id,
             action_colored,
             actor_colored,
-            truncate_vis(delta, 8),
+            text::truncate(delta, 8),
             t,
             pad
         );
@@ -538,8 +523,10 @@ pub fn print_stats(store: &TaskStore, term_w: usize) -> Result<()> {
             PURPLE
         };
         println!(
-            "   {color}@{:<10}{RESET} {:>2} ({:>3.0}%)  {color}{bar}{RESET}",
-            owner, cnt, pct
+            "   {color}@{}{RESET} {:>2} ({:>3.0}%)  {color}{bar}{RESET}",
+            text::pad(owner, 10),
+            cnt,
+            pct
         );
     }
 
@@ -549,7 +536,12 @@ pub fn print_stats(store: &TaskStore, term_w: usize) -> Result<()> {
     cats_vec.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (cat, cnt) in &cats_vec {
         let pct = (*cnt as f64 / total as f64) * 100.0;
-        println!("   {AQUA}{:<20}{RESET} {:>2} ({:>3.0}%)", cat, cnt, pct);
+        println!(
+            "   {AQUA}{}{RESET} {:>2} ({:>3.0}%)",
+            text::pad(cat, 20),
+            cnt,
+            pct
+        );
     }
 
     // Section 5: Verification & Eval Yield
@@ -633,11 +625,11 @@ pub fn run_fuzzy_finder(
     for c in &cards {
         let proj = c.meta.project.as_deref().unwrap_or("");
         fzf_input.push_str(&format!(
-            "{:<6} │ {:<2} │ {:<13} │ @{:<8} │ {} {} \t{}\n",
+            "{:<6} │ {:<2} │ {:<13} │ @{} │ {} {} \t{}\n",
             c.meta.id,
             c.meta.priority,
             c.meta.status.as_str(),
-            c.meta.owner,
+            text::pad(&c.meta.owner, 8),
             c.meta.title,
             proj,
             c.path
@@ -1165,6 +1157,31 @@ pub fn print_json_value<T: serde::Serialize>(val: &T, force_color: bool) -> anyh
     Ok(())
 }
 
+/// Left-hand label of a Gantt row, `label_w` cells wide once ANSI codes are stripped.
+fn gantt_row_label(t: &CpmTaskSchedule, label_w: usize) -> String {
+    let status_short = match t.status.as_str() {
+        "pending-close" => "◐ rev",
+        "in-progress" => "● act",
+        "blocked" => "✖ blk",
+        "ready" => "○ rdy",
+        "done" => "✓ don",
+        "inbox" => "◌ inb",
+        _ => "·    ",
+    };
+
+    if label_w >= 22 {
+        let owner_trunc = text::fit(&t.owner, 6);
+        format!(
+            "{BOLD}{:<7}{RESET} {DIM}@{}{RESET} {:<6}",
+            t.id, owner_trunc, status_short
+        )
+    } else if label_w >= 18 {
+        format!("{BOLD}{:<7}{RESET} {:<10}", t.id, status_short)
+    } else {
+        format!("{BOLD}{:<12}{RESET}", t.id)
+    }
+}
+
 pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
     if analysis.schedule.is_empty() {
         println!("\n{BOLD_WHITE}🎯 TIMELINE & EXECUTION SCHEDULE (TERMINAL GANTT){RESET}");
@@ -1287,31 +1304,7 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
             }
         }
 
-        let status_short = match t.status.as_str() {
-            "pending-close" => "◐ rev",
-            "in-progress" => "● act",
-            "blocked" => "✖ blk",
-            "ready" => "○ rdy",
-            "done" => "✓ don",
-            "inbox" => "◌ inb",
-            _ => "·    ",
-        };
-
-        let row_label = if label_w >= 22 {
-            let owner_trunc = if t.owner.len() > 6 {
-                &t.owner[..6]
-            } else {
-                &t.owner
-            };
-            format!(
-                "{BOLD}{:<7}{RESET} {DIM}@{:<6}{RESET} {:<6}",
-                t.id, owner_trunc, status_short
-            )
-        } else if label_w >= 18 {
-            format!("{BOLD}{:<7}{RESET} {:<10}", t.id, status_short)
-        } else {
-            format!("{BOLD}{:<12}{RESET}", t.id)
-        };
+        let row_label = gantt_row_label(t, label_w);
 
         let dur_info = if is_crit {
             format!(" {BOLD}{RED}{}{RESET}", t.duration_display)
@@ -1327,14 +1320,7 @@ pub fn render_terminal_gantt(analysis: &CpmAnalysis, term_w: usize) {
         let title_info = if show_title {
             let max_t = term_w.saturating_sub(label_w + bar_w + dur_info.len() + 10);
             if max_t >= 8 {
-                let mut title_sub = t.title.clone();
-                if title_sub.chars().count() > max_t {
-                    title_sub = title_sub
-                        .chars()
-                        .take(max_t.saturating_sub(1))
-                        .collect::<String>()
-                        + "…";
-                }
+                let title_sub = text::truncate(&t.title, max_t);
                 format!(" {DIM}\"{}\"{RESET}", title_sub)
             } else {
                 String::new()
@@ -1453,7 +1439,7 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
             let cond_plain_len = if t.is_critical {
                 if t.status == "pending-close" { 19 } else { 10 }
             } else if t.buffer_seconds > 0 {
-                9 + t.buffer_display.chars().count()
+                9 + text::width(&t.buffer_display)
             } else {
                 10
             };
@@ -1462,7 +1448,7 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
                 let clean_p = p.trim_matches('[').trim_matches(']');
                 (
                     format!("{PURPLE}+{}{RESET}", clean_p),
-                    clean_p.chars().count() + 1,
+                    text::width(clean_p) + 1,
                 )
             } else {
                 (format!("{DIM}[global]{RESET}"), 8)
@@ -1472,7 +1458,7 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
             println!("  {DIM}┌{}┐{RESET}", "─".repeat(box_w.saturating_sub(2)));
 
             // Line 1: ID, Project, Condition
-            let line1_visible = t.id.chars().count() + 2 + proj_plain_len + cond_plain_len;
+            let line1_visible = text::width(&t.id) + 2 + proj_plain_len + cond_plain_len;
             let pad1 = inner_w.saturating_sub(line1_visible);
             println!(
                 "  {DIM}│{RESET} {BOLD}{}{RESET} {} {}{}{} {DIM}│{RESET}",
@@ -1484,15 +1470,8 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
             );
 
             // Line 2: Title
-            let mut title_sub = t.title.clone();
-            if title_sub.chars().count() > inner_w {
-                title_sub = title_sub
-                    .chars()
-                    .take(inner_w.saturating_sub(1))
-                    .collect::<String>()
-                    + "…";
-            }
-            let pad_title = inner_w.saturating_sub(title_sub.chars().count());
+            let title_sub = text::truncate(&t.title, inner_w);
+            let pad_title = inner_w.saturating_sub(text::width(&title_sub));
             println!(
                 "  {DIM}│{RESET} {}{}{} {DIM}│{RESET}",
                 title_sub,
@@ -1507,15 +1486,8 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
                 "d: {} │ ES: {} · EF: {} │ Buf: {} │ @{}",
                 t.duration_display, es_str, ef_str, t.buffer_display, t.owner
             );
-            let mut metrics_sub = metrics_str.clone();
-            if metrics_sub.chars().count() > inner_w {
-                metrics_sub = metrics_sub
-                    .chars()
-                    .take(inner_w.saturating_sub(1))
-                    .collect::<String>()
-                    + "…";
-            }
-            let pad_metrics = inner_w.saturating_sub(metrics_sub.chars().count());
+            let metrics_sub = text::truncate(&metrics_str, inner_w);
+            let pad_metrics = inner_w.saturating_sub(text::width(&metrics_sub));
             println!(
                 "  {DIM}│{RESET} {}{}{} {DIM}│{RESET}",
                 metrics_sub,
@@ -1526,15 +1498,8 @@ pub fn render_terminal_aon(analysis: &CpmAnalysis, term_w: usize, project_filter
             // Line 4: Prerequisites if any
             if !t.blocked_by.is_empty() {
                 let reqs = format!("Needs: {}", t.blocked_by.join(", "));
-                let mut reqs_sub = reqs.clone();
-                if reqs_sub.chars().count() > inner_w {
-                    reqs_sub = reqs_sub
-                        .chars()
-                        .take(inner_w.saturating_sub(1))
-                        .collect::<String>()
-                        + "…";
-                }
-                let pad_reqs = inner_w.saturating_sub(reqs_sub.chars().count());
+                let reqs_sub = text::truncate(&reqs, inner_w);
+                let pad_reqs = inner_w.saturating_sub(text::width(&reqs_sub));
                 println!(
                     "  {DIM}│{RESET} {RED}{}{RESET}{} {DIM}│{RESET}",
                     reqs_sub,
@@ -1864,5 +1829,53 @@ mod tests {
         assert!(colored.contains("\x1b[38;2;209;154;102m2\x1b[0m"));
         assert!(colored.contains("\x1b[38;2;198;120;221mtrue\x1b[0m"));
         assert!(colored.contains("\x1b[38;2;152;195;121m\"ken\"\x1b[0m"));
+    }
+
+    fn wide_char_analysis() -> CpmAnalysis {
+        let mut cards = vec![
+            make_timed_card("tk-001", "日本語のタイトルを持つタスク", "30m", vec![]),
+            make_timed_card(
+                "tk-002",
+                "とても長い日本語のタイトルが列幅を超える場合のタスク",
+                "15m",
+                vec!["tk-001"],
+            ),
+        ];
+        // Byte 6 falls inside "日", which used to panic on `&owner[..6]`.
+        cards[0].meta.owner = "ab日本語".to_string();
+        cards[1].meta.owner = "山田".to_string();
+        compute_cpm(&cards)
+    }
+
+    #[test]
+    fn test_gantt_row_label_keeps_width_with_wide_owner() {
+        let analysis = wide_char_analysis();
+        for label_w in [22, 18, 12] {
+            for t in &analysis.schedule {
+                let label = text::strip_ansi(&gantt_row_label(t, label_w));
+                assert_eq!(
+                    text::width(&label),
+                    label_w,
+                    "label for owner {:?} should be {label_w} cells: {label:?}",
+                    t.owner
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_gantt_row_label_truncates_multibyte_owner() {
+        let analysis = wide_char_analysis();
+        let label = text::strip_ansi(&gantt_row_label(&analysis.schedule[0], 22));
+        assert!(label.contains("@ab日… "), "unexpected label: {label:?}");
+    }
+
+    #[test]
+    fn test_render_terminal_views_with_wide_chars_do_not_panic() {
+        let analysis = wide_char_analysis();
+        for term_w in [60, 80, 120] {
+            render_terminal_gantt(&analysis, term_w);
+            render_terminal_aon(&analysis, term_w, None);
+        }
     }
 }
