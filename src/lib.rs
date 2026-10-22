@@ -1884,7 +1884,7 @@ pub fn run() -> Result<()> {
                         if !analysis.critical_path.is_empty() {
                             println!(
                                 "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
-                                analysis.critical_path.join(" ➔ ")
+                                crate::analytics::format_critical_path(&analysis.schedule)
                             );
                         }
                         let crit_count = analysis.schedule.iter().filter(|t| t.is_critical).count();
@@ -1943,7 +1943,7 @@ pub fn run() -> Result<()> {
                         if !analysis.critical_path.is_empty() {
                             println!(
                                 "  {BOLD}Critical Path:{RESET}    {BOLD}{RED}{}{RESET}",
-                                analysis.critical_path.join(" ➔ ")
+                                crate::analytics::format_critical_path(&analysis.schedule)
                             );
                         }
                         let crit_count = analysis.schedule.iter().filter(|t| t.is_critical).count();
@@ -1987,7 +1987,7 @@ pub fn run() -> Result<()> {
                         if !analysis.critical_path.is_empty() {
                             println!(
                                 "  {BOLD}Path:{RESET}     {BOLD}{RED}{}{RESET}",
-                                analysis.critical_path.join(" ➔ ")
+                                crate::analytics::format_critical_path(&analysis.schedule)
                             );
                         }
                         let crit_count = analysis.schedule.iter().filter(|t| t.is_critical).count();
@@ -2275,7 +2275,7 @@ pub fn run() -> Result<()> {
                     );
                     println!(
                         "  {BOLD}{RED}{}{RESET}\n",
-                        analysis.critical_path.join(" ➔ ")
+                        crate::analytics::format_critical_path(&analysis.schedule)
                     );
                 }
             } else if is_mermaid {
